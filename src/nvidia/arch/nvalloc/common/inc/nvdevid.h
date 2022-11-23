@@ -156,6 +156,7 @@
 ///////////////////////////////////////////////////////////////////////////////////////////
 
 #define NV_PCI_DEVID_DEVICE_PG171_SKU200_PG179_SKU220 0x25B6 /* NVIDIA A16 / NVIDIA A2 */
+#define NV_PCI_DEVID_DEVICE_PG189_SKU600              0x1EBA
 
 ///////////////////////////////////////////////////////////////////////////////////////////
 //
@@ -625,6 +626,7 @@ enum {
 ,     CS_NVIDIA_T186
 ,     CS_NVIDIA_T194
 ,     CS_NVIDIA_T234
+,     CS_NVIDIA_T23x
 ,     CS_MARVELL_THUNDERX2
 ,     CS_REDHAT_QEMU
 ,     CS_AMPERE_EMAG
@@ -632,7 +634,6 @@ enum {
 ,     CS_MELLANOX_BLUEFIELD
 ,     CS_AMAZON_GRAVITRON2
 ,     CS_FUJITSU_A64FX
-,     CS_PHYTIUM_FT2000
 ,     CS_AMPERE_ALTRA
 ,     CS_ARM_NEOVERSEN1
 ,     CS_MARVELL_OCTEON_CN96XX
@@ -641,6 +642,9 @@ enum {
 ,     CS_HYGON_C86
 ,     CS_PHYTIUM_S2500
 ,     CS_MELLANOX_BLUEFIELD2
+,     CS_INTEL_1B81
+,     CS_INTEL_18DC
+,     CS_INTEL_7A04
 ,     CS_MAX_PCIE
 };
 

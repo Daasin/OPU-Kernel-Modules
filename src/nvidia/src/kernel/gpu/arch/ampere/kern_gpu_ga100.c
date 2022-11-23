@@ -26,6 +26,20 @@
 #include "gpu/mem_mgr/mem_mgr.h"
 #include "published/ampere/ga100/dev_fb.h"
 #include "published/ampere/ga100/dev_vm.h"
+#include "published/ampere/ga100/dev_fuse.h"
+
+/*!
+ * @brief Read fuse for display supported status.
+ *        Some chips not marked displayless do not support display
+ */
+NvBool
+gpuFuseSupportsDisplay_GA100
+(
+    OBJGPU *pGpu
+)
+{
+    return GPU_FLD_TEST_DRF_DEF(pGpu, _FUSE, _STATUS_OPT_DISPLAY, _DATA, _ENABLE);
+}
 
 /*!
  * @brief Clear FBHUB POISON Interrupt state for Bug 2924523.
@@ -132,8 +146,9 @@ static const GPUCHILDPRESENT gpuChildrenPresent_GA100[] =
     { classId(KernelDisplay), 1 },
     { classId(VirtMemAllocator), 1 },
     { classId(OBJDPAUX), 1 },
-    { classId(OBJFAN), 1 },
-    { classId(OBJHSHUB), 2 },
+    { classId(Fan), 1 },
+    { classId(OBJHSHUBMANAGER), 1 },
+    { classId(Hshub), 2 },
     { classId(MemorySystem), 1 },
     { classId(KernelMemorySystem), 1 },
     { classId(MemoryManager), 1 },
@@ -178,7 +193,6 @@ static const GPUCHILDPRESENT gpuChildrenPresent_GA100[] =
     { classId(OBJFAS), 1 },
     { classId(OBJVMMU), 1 },
     { classId(OBJOFA), 1 },
-    { classId(KernelNvdec), 1 },
     { classId(KernelSec2), 1 },
     { classId(KernelGsp), 1 },
 };
@@ -221,8 +235,9 @@ static const GPUCHILDPRESENT gpuChildrenPresent_GA102[] =
     {classId(KernelDisplay), 1},
     {classId(VirtMemAllocator), 1},
     {classId(OBJDPAUX), 1},
-    {classId(OBJFAN), 1},
-    {classId(OBJHSHUB), 2 },
+    {classId(Fan), 1},
+    {classId(OBJHSHUBMANAGER), 1 },
+    {classId(Hshub), 2 },
     {classId(MemorySystem), 1},
     {classId(KernelMemorySystem), 1},
     {classId(MemoryManager), 1},
@@ -267,7 +282,6 @@ static const GPUCHILDPRESENT gpuChildrenPresent_GA102[] =
     {classId(OBJFAS), 1},
     {classId(OBJVMMU), 1},
     {classId(OBJOFA), 1 },
-    {classId(KernelNvdec), 1},
     {classId(KernelSec2), 1},
     {classId(KernelGsp), 1},
 };

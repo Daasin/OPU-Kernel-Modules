@@ -319,6 +319,7 @@ int nv_encode_caching(
             break;
 #if defined(NV_PGPROT_WRITE_COMBINED) && \
     defined(NV_PGPROT_WRITE_COMBINED_DEVICE)
+        case NV_MEMORY_DEFAULT:
         case NV_MEMORY_WRITECOMBINED:
             if (NV_ALLOW_WRITE_COMBINING(memory_type))
             {
@@ -430,7 +431,7 @@ static int nvidia_mmap_numa(
     const nv_alloc_mapping_context_t *mmap_context)
 {
     NvU64 start, addr;
-    unsigned int pages;
+    NvU64 pages;
     NvU64 i;
 
     pages = NV_VMA_SIZE(vma) >> PAGE_SHIFT;
@@ -530,7 +531,7 @@ int nvidia_mmap_helper(
             else
             {
                 if (nv_encode_caching(&vma->vm_page_prot,
-                        rm_disable_iomap_wc() ? NV_MEMORY_UNCACHED : NV_MEMORY_WRITECOMBINED, 
+                        rm_disable_iomap_wc() ? NV_MEMORY_UNCACHED : mmap_context->caching, 
                         NV_MEMORY_TYPE_FRAMEBUFFER))
                 {
                     if (nv_encode_caching(&vma->vm_page_prot,
@@ -679,13 +680,11 @@ int nvidia_mmap(
         return -EINVAL;
     }
 
-    down(&nvlfp->fops_sp_lock[NV_FOPS_STACK_INDEX_MMAP]);
-
-    sp = nvlfp->fops_sp[NV_FOPS_STACK_INDEX_MMAP];
+    sp = nv_nvlfp_get_sp(nvlfp, NV_FOPS_STACK_INDEX_MMAP);
 
     status = nvidia_mmap_helper(nv, nvlfp, sp, vma, NULL);
 
-    up(&nvlfp->fops_sp_lock[NV_FOPS_STACK_INDEX_MMAP]);
+    nv_nvlfp_put_sp(nvlfp, NV_FOPS_STACK_INDEX_MMAP);
 
     return status;
 }

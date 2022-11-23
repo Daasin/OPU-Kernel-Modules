@@ -27,16 +27,11 @@
 #include "nv-pci.h"
 #include "nv-register-module.h"
 
-
-
-
 extern const char *nv_device_name;
 extern nvidia_module_t nv_fops;
 
 void        nv_acpi_register_notifier   (nv_linux_state_t *);
 void        nv_acpi_unregister_notifier (nv_linux_state_t *);
-int         nv_acpi_init                (void);
-int         nv_acpi_uninit              (void);
 
 NvU8        nv_find_pci_capability      (struct pci_dev *, NvU8);
 
@@ -58,8 +53,6 @@ NV_STATUS   nv_alloc_contig_pages       (nv_state_t *, nv_alloc_t *);
 void        nv_free_contig_pages        (nv_alloc_t *);
 NV_STATUS   nv_alloc_system_pages       (nv_state_t *, nv_alloc_t *);
 void        nv_free_system_pages        (nv_alloc_t *);
-
-void        nv_address_space_init_once  (struct address_space *mapping);
 
 int         nv_uvm_init                 (void);
 void        nv_uvm_exit                 (void);

@@ -50,6 +50,13 @@ void NV_API_CALL rm_cleanup_dynamic_power_management(
 {
 }
 
+void NV_API_CALL rm_enable_dynamic_power_management(
+    nvidia_stack_t *sp,
+    nv_state_t     *nv
+)
+{
+}
+
 NV_STATUS NV_API_CALL rm_ref_dynamic_power(
     nvidia_stack_t          *sp,
     nv_state_t              *nv,
@@ -200,16 +207,6 @@ os_unref_dynamic_power
 {
 }
 
-NV_STATUS  NV_API_CALL rm_get_clientnvpcf_power_limits(
-    nvidia_stack_t *sp,
-    nv_state_t     *nv,
-    NvU32          *limitRated,
-    NvU32          *limitCurr
-)
-{
-    return NV_ERR_NOT_SUPPORTED;
-}
-
 NV_STATUS
 deviceCtrlCmdOsUnixVTSwitch_IMPL
 (
@@ -226,24 +223,6 @@ NV_STATUS NV_API_CALL rm_save_low_res_mode(
 )
 {
     return NV_ERR_NOT_SUPPORTED;
-}
-
-NV_STATUS NV_API_CALL rm_gpu_copy_mmu_faults(
-    nvidia_stack_t *sp,
-    nv_state_t *nv,
-    NvU32 *faultsCopied
-)
-{
-    return NV_OK;
-}
-
-NV_STATUS NV_API_CALL rm_gpu_copy_mmu_faults_unlocked(
-    nvidia_stack_t *sp,
-    nv_state_t *nv,
-    NvU32 *faultsCopied
-)
-{
-    return NV_OK;
 }
 
 NV_STATUS RmInitX86EmuState(OBJGPU *pGpu)

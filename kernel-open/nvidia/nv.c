@@ -21,6 +21,14 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <linux/module.h>  // for MODULE_FIRMWARE
+
+// must precede "nv.h" and "nv-firmware.h" includes
+#define NV_FIRMWARE_PATH_FOR_FILENAME(filename)  "nvidia/" NV_VERSION_STRING "/" filename
+#define NV_FIRMWARE_DECLARE_GSP_FILENAME(filename) \
+    MODULE_FIRMWARE(NV_FIRMWARE_PATH_FOR_FILENAME(filename));
+#include "nv-firmware.h"
+
 #include "nvmisc.h"
 #include "os-interface.h"
 #include "nv-linux.h"
@@ -37,10 +45,8 @@
 #include "nv-vgpu-vfio-interface.h"
 #endif
 
-
 #include "nvlink_proto.h"
 #include "nvlink_caps.h"
-
 
 #include "nv-frontend.h"
 #include "nv-hypervisor.h"
@@ -92,11 +98,6 @@ const NvBool nv_is_rm_firmware_supported_os = NV_TRUE;
 char *rm_firmware_active = NULL;
 NV_MODULE_STRING_PARAMETER(rm_firmware_active);
 
-#define NV_FIRMWARE_GSP_FILENAME     "nvidia/" NV_VERSION_STRING "/gsp.bin"
-#define NV_FIRMWARE_GSP_LOG_FILENAME "nvidia/" NV_VERSION_STRING "/gsp_log.bin"
-
-MODULE_FIRMWARE(NV_FIRMWARE_GSP_FILENAME);
-
 /*
  * Global NVIDIA capability state, for GPU driver
  */
@@ -114,6 +115,7 @@ nv_linux_state_t *nv_linux_devices;
  * And one for the control device
  */
 nv_linux_state_t nv_ctl_device = { { 0 } };
+extern NvU32 nv_dma_remap_peer_mmio;
 
 nv_kthread_q_t nv_kthread_q;
 nv_kthread_q_t nv_deferred_close_kthread_q;
@@ -140,11 +142,6 @@ static NvTristate nv_chipset_is_io_coherent = NV_TRISTATE_INDETERMINATE;
 // True if all the successfully probed devices support ATS
 // Assigned at device probe (module init) time
 NvBool nv_ats_supported = NVCPU_IS_PPC64LE
-
-
-
-
-
 ;
 
 // allow an easy way to convert all debug printfs related to events
@@ -289,14 +286,12 @@ nv_alloc_t *nvos_create_alloc(
     nv_alloc_t *at;
     unsigned int pt_size, i;
 
-    NV_KMALLOC(at, sizeof(nv_alloc_t));
+    NV_KZALLOC(at, sizeof(nv_alloc_t));
     if (at == NULL)
     {
         nv_printf(NV_DBG_ERRORS, "NVRM: failed to allocate alloc info\n");
         return NULL;
     }
-
-    memset(at, 0, sizeof(nv_alloc_t));
 
     at->dev = dev;
     pt_size = num_pages *  sizeof(nvidia_pte_t *);
@@ -415,15 +410,12 @@ exit:
     return rc;
 }
 
-
 static void
 nvlink_drivers_exit(void)
 {
-
 #if NVCPU_IS_64_BITS
     nvswitch_exit();
 #endif
-
 
 #if defined(NVCPU_PPC64LE)
     ibmnpu_exit();
@@ -431,8 +423,6 @@ nvlink_drivers_exit(void)
 
     nvlink_core_exit();
 }
-
-
 
 static int __init
 nvlink_drivers_init(void)
@@ -456,7 +446,6 @@ nvlink_drivers_init(void)
     }
 #endif
 
-
 #if NVCPU_IS_64_BITS
     rc = nvswitch_init();
     if (rc < 0)
@@ -469,10 +458,8 @@ nvlink_drivers_init(void)
     }
 #endif
 
-
     return rc;
 }
-
 
 static void
 nv_module_state_exit(nv_stack_t *sp)
@@ -571,6 +558,12 @@ nv_registry_keys_init(nv_stack_t *sp)
             WARN_ON(status != NV_OK);
         }
     }
+
+    status = rm_read_registry_dword(sp, nv, NV_DMA_REMAP_PEER_MMIO, &data);
+    if (status == NV_OK)
+    {
+        nv_dma_remap_peer_mmio = data;
+    }
 }
 
 static void __init
@@ -593,9 +586,6 @@ nv_report_applied_patches(void)
 static void
 nv_drivers_exit(void)
 {
-
-
-
     nv_pci_unregister_driver();
 
     nvidia_unregister_module(&nv_fops);
@@ -622,16 +612,6 @@ nv_drivers_init(void)
         goto exit;
     }
 
-
-
-
-
-
-
-
-
-
-
 exit:
     if (rc < 0)
     {
@@ -649,9 +629,7 @@ nv_module_exit(nv_stack_t *sp)
     rm_shutdown_rm(sp);
 
     nv_destroy_rsync_info();
-
     nvlink_drivers_exit();
-
 
     nv_cap_drv_exit();
 
@@ -676,13 +654,11 @@ nv_module_init(nv_stack_t **sp)
         goto cap_drv_exit;
     }
 
-
     rc = nvlink_drivers_init();
     if (rc < 0)
     {
         goto cap_drv_exit;
     }
-
 
     nv_init_rsync_info(); 
     nv_sev_init();
@@ -707,9 +683,7 @@ init_rm_exit:
 
 nvlink_exit:
     nv_destroy_rsync_info();
-
     nvlink_drivers_exit();
-
 
 cap_drv_exit:
     nv_cap_drv_exit();
@@ -912,16 +886,18 @@ static void *nv_alloc_file_private(void)
     nv_linux_file_private_t *nvlfp;
     unsigned int i;
 
-    NV_KMALLOC(nvlfp, sizeof(nv_linux_file_private_t));
+    NV_KZALLOC(nvlfp, sizeof(nv_linux_file_private_t));
     if (!nvlfp)
         return NULL;
 
-    memset(nvlfp, 0, sizeof(nv_linux_file_private_t));
-
-    for (i = 0; i < NV_FOPS_STACK_INDEX_COUNT; ++i)
+    if (rm_is_altstack_in_use())
     {
-        NV_INIT_MUTEX(&nvlfp->fops_sp_lock[i]);
+        for (i = 0; i < NV_FOPS_STACK_INDEX_COUNT; ++i)
+        {
+            NV_INIT_MUTEX(&nvlfp->fops_sp_lock[i]);
+        }
     }
+
     init_waitqueue_head(&nvlfp->waitqueue);
     NV_SPIN_LOCK_INIT(&nvlfp->fp_lock);
 
@@ -1194,7 +1170,7 @@ static int nv_start_device(nv_state_t *nv, nvidia_stack_t *sp)
         goto failed;
     }
 
-    if (nv_dev_is_pci(nvl->dev) && (nv->pci_info.device_id == 0))
+    if (dev_is_pci(nvl->dev) && (nv->pci_info.device_id == 0))
     {
         nv_printf(NV_DBG_ERRORS, "NVRM: open of non-existent GPU with minor number %d\n", nvl->minor_num);
         rc = -ENXIO;
@@ -1237,7 +1213,7 @@ static int nv_start_device(nv_state_t *nv, nvidia_stack_t *sp)
     }
 
 #if defined(NV_LINUX_PCIE_MSI_SUPPORTED)
-    if (nv_dev_is_pci(nvl->dev))
+    if (dev_is_pci(nvl->dev))
     {
         if (!(nv->flags & NV_FLAG_PERSISTENT_SW_STATE))
         {
@@ -1259,7 +1235,8 @@ static int nv_start_device(nv_state_t *nv, nvidia_stack_t *sp)
 #endif
 
     if (((!(nv->flags & NV_FLAG_USES_MSI)) && (!(nv->flags & NV_FLAG_USES_MSIX)))
-        && (nv->interrupt_line == 0) && !(nv->flags & NV_FLAG_SOC_DISPLAY))
+        && (nv->interrupt_line == 0) && !(nv->flags & NV_FLAG_SOC_DISPLAY)
+        && !(nv->flags & NV_FLAG_SOC_IGPU))
     {
         NV_DEV_PRINTF(NV_DBG_ERRORS, nv,
                       "No interrupts of any type are available. Cannot use this GPU.\n");
@@ -1272,9 +1249,6 @@ static int nv_start_device(nv_state_t *nv, nvidia_stack_t *sp)
     {
         if (nv->flags & NV_FLAG_SOC_DISPLAY)
         {
-
-
-
         }
         else if (!(nv->flags & NV_FLAG_USES_MSIX))
         {
@@ -1324,15 +1298,13 @@ static int nv_start_device(nv_state_t *nv, nvidia_stack_t *sp)
     if (!rm_init_adapter(sp, nv))
     {
         if (!(nv->flags & NV_FLAG_USES_MSIX) &&
-            !(nv->flags & NV_FLAG_SOC_DISPLAY))
+            !(nv->flags & NV_FLAG_SOC_DISPLAY) &&
+            !(nv->flags & NV_FLAG_SOC_IGPU))
         {
             free_irq(nv->interrupt_line, (void *) nvl);
         }
         else if (nv->flags & NV_FLAG_SOC_DISPLAY)
         {
-
-
-
         }
 #if defined(NV_LINUX_PCIE_MSI_SUPPORTED)
         else
@@ -1385,7 +1357,7 @@ failed:
         if(nvl->irq_count)
             NV_KFREE(nvl->irq_count, nvl->num_intr * sizeof(nv_irq_count_info_t));
     }
-    if (nv->flags & NV_FLAG_USES_MSIX)
+    else if (nv->flags & NV_FLAG_USES_MSIX)
     {
         nv->flags &= ~NV_FLAG_USES_MSIX;
         pci_disable_msix(nvl->pci_dev);
@@ -1495,7 +1467,7 @@ static void nv_init_mapping_revocation(nv_linux_state_t *nvl,
     down(&nvl->mmap_lock);
 
     /* Set up struct address_space for use with unmap_mapping_range() */
-    nv_address_space_init_once(&nvlfp->mapping);
+    address_space_init_once(&nvlfp->mapping);
     nvlfp->mapping.host = inode;
     nvlfp->mapping.a_ops = inode->i_mapping->a_ops;
 #if defined(NV_ADDRESS_SPACE_HAS_BACKING_DEV_INFO)
@@ -1662,7 +1634,8 @@ void nv_shutdown_adapter(nvidia_stack_t *sp,
     }
 
     if (!(nv->flags & NV_FLAG_USES_MSIX) &&
-        !(nv->flags & NV_FLAG_SOC_DISPLAY))
+        !(nv->flags & NV_FLAG_SOC_DISPLAY) &&
+        !(nv->flags & NV_FLAG_SOC_IGPU))
     {
         free_irq(nv->interrupt_line, (void *)nvl);
         if (nv->flags & NV_FLAG_USES_MSI)
@@ -1674,9 +1647,6 @@ void nv_shutdown_adapter(nvidia_stack_t *sp,
     }
     else if (nv->flags & NV_FLAG_SOC_DISPLAY)
     {
-
-
-
     }
 #if defined(NV_LINUX_PCIE_MSI_SUPPORTED)
     else
@@ -2009,7 +1979,7 @@ static int nvidia_read_card_info(nv_ioctl_card_info_t *ci, size_t num_entries)
         ci[i].reg_address        = nv->regs->cpu_address;
         ci[i].reg_size           = nv->regs->size;
         ci[i].minor_number       = nvl->minor_num;
-        if (nv_dev_is_pci(nvl->dev))
+        if (dev_is_pci(nvl->dev))
         {
             ci[i].fb_address         = nv->fb->cpu_address;
             ci[i].fb_size            = nv->fb->size;
@@ -2048,8 +2018,7 @@ nvidia_ioctl(
     if (status < 0)
         return status;
 
-    down(&nvlfp->fops_sp_lock[NV_FOPS_STACK_INDEX_IOCTL]);
-    sp = nvlfp->fops_sp[NV_FOPS_STACK_INDEX_IOCTL];
+    sp = nv_nvlfp_get_sp(nvlfp, NV_FOPS_STACK_INDEX_IOCTL);
 
     rmStatus = nv_check_gpu_state(nv);
     if (rmStatus == NV_ERR_GPU_IS_LOST)
@@ -2360,7 +2329,7 @@ unlock:
     }
 
 done:
-    up(&nvlfp->fops_sp_lock[NV_FOPS_STACK_INDEX_IOCTL]);
+    nv_nvlfp_put_sp(nvlfp, NV_FOPS_STACK_INDEX_IOCTL);
 
     up_read(&nv_system_pm_lock);
 
@@ -2425,7 +2394,7 @@ nvidia_isr(
     NvU64 currentTime = 0;
     NvBool found_irq = NV_FALSE;
 
-    rm_gpu_copy_mmu_faults_unlocked(nvl->sp[NV_DEV_STACK_ISR], nv, &rm_serviceable_fault_cnt);
+    rm_gpu_handle_mmu_faults(nvl->sp[NV_DEV_STACK_ISR], nv, &rm_serviceable_fault_cnt);
     rm_fault_handling_needed = (rm_serviceable_fault_cnt != 0);
 
 #if defined (NV_UVM_ENABLE)
@@ -2660,7 +2629,6 @@ nvidia_ctl_open(
     nv_linux_state_t *nvl = &nv_ctl_device;
     nv_state_t *nv = NV_STATE_PTR(nvl);
     nv_linux_file_private_t *nvlfp = NV_GET_LINUX_FILE_PRIVATE(file);
-    static int count = 0;
 
     nv_printf(NV_DBG_INFO, "NVRM: nvidia_ctl_open\n");
 
@@ -2672,13 +2640,6 @@ nvidia_ctl_open(
     if (NV_ATOMIC_READ(nvl->usage_count) == 0)
     {
         nv->flags |= (NV_FLAG_OPEN | NV_FLAG_CONTROL);
-
-        if ((nv_acpi_init() < 0) &&
-            (count++ < NV_MAX_RECURRING_WARNING_MESSAGES))
-        {
-            nv_printf(NV_DBG_ERRORS,
-                "NVRM: failed to register with the ACPI subsystem!\n");
-        }
     }
 
     NV_ATOMIC_INC(nvl->usage_count);
@@ -2702,7 +2663,6 @@ nvidia_ctl_close(
     nv_state_t *nv = NV_STATE_PTR(nvl);
     nv_linux_file_private_t *nvlfp = NV_GET_LINUX_FILE_PRIVATE(file);
     nvidia_stack_t *sp = nvlfp->sp;
-    static int count = 0;
     unsigned int i;
 
     nv_printf(NV_DBG_INFO, "NVRM: nvidia_ctl_close\n");
@@ -2711,13 +2671,6 @@ nvidia_ctl_close(
     if (NV_ATOMIC_DEC_AND_TEST(nvl->usage_count))
     {
         nv->flags &= ~NV_FLAG_OPEN;
-
-        if ((nv_acpi_uninit() < 0) &&
-            (count++ < NV_MAX_RECURRING_WARNING_MESSAGES))
-        {
-            nv_printf(NV_DBG_ERRORS,
-                "NVRM: failed to unregister from the ACPI subsystem!\n");
-        }
     }
     up(&nvl->ldata_lock);
 
@@ -3595,23 +3548,10 @@ NvBool NV_API_CALL nv_is_rm_firmware_active(
     return NV_FALSE;
 }
 
-const char *nv_firmware_path(
-    nv_firmware_t fw_type
-)
-{
-    switch (fw_type)
-    {
-        case NV_FIRMWARE_GSP:
-            return NV_FIRMWARE_GSP_FILENAME;
-        case NV_FIRMWARE_GSP_LOG:
-            return NV_FIRMWARE_GSP_LOG_FILENAME;
-    }
-    return "";
-}
-
 const void* NV_API_CALL nv_get_firmware(
     nv_state_t *nv,
-    nv_firmware_t fw_type,
+    nv_firmware_type_t fw_type,
+    nv_firmware_chip_family_t fw_chip_family,
     const void **fw_buf,
     NvU32 *fw_size
 )
@@ -3621,7 +3561,7 @@ const void* NV_API_CALL nv_get_firmware(
 
     // path is relative to /lib/firmware
     // if this fails it will print an error to dmesg
-    if (request_firmware(&fw, nv_firmware_path(fw_type), nvl->dev) != 0)
+    if (request_firmware(&fw, nv_firmware_path(fw_type, fw_chip_family), nvl->dev) != 0)
         return NULL;
 
     *fw_size = fw->size;
@@ -3842,9 +3782,6 @@ nvos_count_devices(void)
 
     count = nv_pci_count_devices();
 
-
-
-
     return count;
 }
 
@@ -4024,7 +3961,7 @@ nvidia_suspend(
     nv_linux_state_t *nvl;
     nv_state_t *nv;
 
-    if (nv_dev_is_pci(dev))
+    if (dev_is_pci(dev))
     {
         pci_dev = to_pci_dev(dev);
         nvl = pci_get_drvdata(pci_dev);
@@ -4102,7 +4039,7 @@ nvidia_resume(
     nv_linux_state_t *nvl;
     nv_state_t *nv;
 
-    if (nv_dev_is_pci(dev))
+    if (dev_is_pci(dev))
     {
         pci_dev = to_pci_dev(dev);
         nvl = pci_get_drvdata(pci_dev);
@@ -4905,7 +4842,6 @@ NV_STATUS NV_API_CALL nv_get_device_memory_config(
     NvU64 *compr_addr_sys_phys,
     NvU64 *addr_guest_phys,
     NvU32 *addr_width,
-    NvU32 *granularity,
     NvS32 *node_id
 )
 {
@@ -4944,42 +4880,8 @@ NV_STATUS NV_API_CALL nv_get_device_memory_config(
         *addr_width = nv_volta_dma_addr_size - nv_volta_addr_space_width;
     }
 
-    if (granularity != NULL)
-    {
-        *granularity = nv_volta_addr_space_width;
-    }
-
     status = NV_OK;
 #endif
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     return status;
 }
@@ -4991,7 +4893,7 @@ NV_STATUS NV_API_CALL nv_get_nvlink_line_rate(
     NvU32      *linerate
 )
 {
-#if defined(NV_PNV_PCI_GET_NPU_DEV_PRESENT) && defined(NV_OF_GET_PROPERTY_PRESENT)
+#if defined(NV_PNV_PCI_GET_NPU_DEV_PRESENT)
 
     nv_linux_state_t *nvl;
     struct pci_dev   *npuDev;
@@ -5192,7 +5094,6 @@ NvU32 NV_API_CALL nv_get_dev_minor(nv_state_t *nv)
 
 NV_STATUS NV_API_CALL nv_acquire_fabric_mgmt_cap(int fd, int *duped_fd)
 {
-
     *duped_fd = nvlink_cap_acquire(fd, NVLINK_CAP_FABRIC_MANAGEMENT);
     if (*duped_fd < 0)
     {
@@ -5200,9 +5101,6 @@ NV_STATUS NV_API_CALL nv_acquire_fabric_mgmt_cap(int fd, int *duped_fd)
     }
 
     return NV_OK;
-
-
-
 }
 
 /*
@@ -5232,7 +5130,7 @@ void NV_API_CALL nv_audio_dynamic_power(
     struct pci_dev *audio_pci_dev, *pci_dev;
     struct snd_card *card;
 
-    if (!nv_dev_is_pci(dev))
+    if (!dev_is_pci(dev))
         return;
 
     pci_dev = to_pci_dev(dev);
@@ -5382,47 +5280,20 @@ static int nv_match_dev_state(const void *data, struct file *filp, unsigned fd)
     return (data == nvl);
 }
 
+NvBool NV_API_CALL nv_match_gpu_os_info(nv_state_t *nv, void *os_info)
+{
+    nv_linux_state_t *nvl = NV_GET_NVL_FROM_NV_STATE(nv);
+
+    return nv_match_dev_state(nvl, os_info, -1);
+}
+
 NvBool NV_API_CALL nv_is_gpu_accessible(nv_state_t *nv)
 {
     struct files_struct *files = current->files;
     nv_linux_state_t *nvl = NV_GET_NVL_FROM_NV_STATE(nv);
 
-#ifdef NV_ITERATE_FD_PRESENT
     return !!iterate_fd(files, 0, nv_match_dev_state, nvl);
-#else
-    struct fdtable *fdtable;
-    int ret_val = 0;
-    int fd = 0;
-
-    if (files == NULL)
-        return 0;
-
-    spin_lock(&files->file_lock);
-
-    for (fdtable = files_fdtable(files); fd < fdtable->max_fds; fd++)
-    {
-        struct file *filp;
-
-#ifdef READ_ONCE
-        filp = READ_ONCE(fdtable->fd[fd]);
-#else
-        filp = ACCESS_ONCE(fdtable->fd[fd]);
-        smp_read_barrier_depends();
-#endif
-        if (filp == NULL)
-            continue;
-
-        ret_val = nv_match_dev_state(nvl, filp, fd);
-        if (ret_val)
-            break;
-    }
-
-    spin_unlock(&files->file_lock);
-
-    return !!ret_val;
-#endif
 }
-
 
 NvBool NV_API_CALL nv_platform_supports_s0ix(void)
 {
@@ -5452,7 +5323,19 @@ NvBool NV_API_CALL nv_s2idle_pm_configured(void)
         return NV_FALSE;
     }
 
+    /*
+     * init_sync_kiocb() internally uses GPL licensed __get_task_ioprio() from
+     * v5.20-rc1.
+     */
+#if defined(NV_GET_TASK_IOPRIO_PRESENT)
+    memset(&kiocb, 0, sizeof(kiocb));
+    kiocb.ki_filp = file;
+    kiocb.ki_flags = iocb_flags(file);
+    kiocb.ki_ioprio = IOPRIO_DEFAULT;
+#else
     init_sync_kiocb(&kiocb, file);
+#endif
+
     kiocb.ki_pos = 0;
     iov_iter_kvec(&iter, READ, &iov, 1, sizeof(buf));
 
@@ -5474,7 +5357,6 @@ NvBool NV_API_CALL nv_s2idle_pm_configured(void)
 
     return (memcmp(buf, "[s2idle]", 8) == 0);
 }
-
 
 /*
  * Function query system chassis info, to figure out if the platform is
@@ -5546,7 +5428,6 @@ void NV_API_CALL nv_flush_coherent_cpu_cache_range(nv_state_t *nv, NvU64 cpu_vir
 #if NVCPU_IS_PPC64LE
     return nv_ibmnpu_cache_flush_range(nv, cpu_virtual, size);
 #elif NVCPU_IS_AARCH64
-
     NvU64 va, cbsize;
     NvU64 end_cpu_virtual = cpu_virtual + size;
     
@@ -5566,7 +5447,6 @@ void NV_API_CALL nv_flush_coherent_cpu_cache_range(nv_state_t *nv, NvU64 cpu_vir
         cond_resched();
     }
     asm volatile("dsb sy" : : : "memory");
-
 #endif
 }
 

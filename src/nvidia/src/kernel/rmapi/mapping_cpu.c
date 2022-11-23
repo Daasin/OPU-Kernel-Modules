@@ -152,6 +152,14 @@ rmapiGetEffectiveAddrSpace
     return NV_OK;
 }
 
+// Asserts to check caching type matches across sdk and nv_memory_types
+ct_assert(NVOS33_FLAGS_CACHING_TYPE_CACHED        == NV_MEMORY_CACHED);
+ct_assert(NVOS33_FLAGS_CACHING_TYPE_UNCACHED      == NV_MEMORY_UNCACHED);
+ct_assert(NVOS33_FLAGS_CACHING_TYPE_WRITECOMBINED == NV_MEMORY_WRITECOMBINED);
+ct_assert(NVOS33_FLAGS_CACHING_TYPE_WRITEBACK     == NV_MEMORY_WRITEBACK);
+ct_assert(NVOS33_FLAGS_CACHING_TYPE_DEFAULT       == NV_MEMORY_DEFAULT);
+ct_assert(NVOS33_FLAGS_CACHING_TYPE_UNCACHED_WEAK == NV_MEMORY_UNCACHED_WEAK);
+
 //
 // Map memory entry points.
 //
@@ -181,6 +189,8 @@ memMap_IMPL
     NvBool bBroadcast;
     NvU64 mapLimit;
     NvBool bIsSysmem = NV_FALSE;
+    NvBool bSkipSizeCheck = (DRF_VAL(OS33, _FLAGS, _SKIP_SIZE_CHECK, pMapParams->flags) ==
+                             NVOS33_FLAGS_SKIP_SIZE_CHECK_ENABLE);
 
     NV_ASSERT_OR_RETURN(RMCFG_FEATURE_KERNEL_RM, NV_ERR_NOT_SUPPORTED);
 
@@ -218,12 +228,12 @@ memMap_IMPL
     //
     // CPU to directly access protected memory is allowed on MODS
     //
-    if ((pMemoryInfo->Flags & NVOS32_ALLOC_FLAGS_PROTECTED) &&
-        (pMapParams->protect != NV_PROTECT_WRITEABLE) &&
-        ! RMCFG_FEATURE_PLATFORM_MODS)
-    {
-        return NV_ERR_NOT_SUPPORTED;
-    }
+        if ((pMemoryInfo->Flags & NVOS32_ALLOC_FLAGS_PROTECTED) &&
+            (pMapParams->protect != NV_PROTECT_WRITEABLE) &&
+            ! RMCFG_FEATURE_PLATFORM_MODS)
+        {
+            return NV_ERR_NOT_SUPPORTED;
+        }
 
     if (!pMapParams->bKernel &&
         FLD_TEST_DRF(OS32, _ATTR2, _PROTECTION_USER, _READ_ONLY, pMemoryInfo->Attr2) &&
@@ -247,9 +257,8 @@ memMap_IMPL
     // actual allocation size (to PAGE_SIZE+1) because of a buggy ms function so
     // skip the allocation size sanity check so the map operation still succeeds.
     //
-    if ((DRF_VAL(OS33, _FLAGS, _SKIP_SIZE_CHECK, pMapParams->flags) == NVOS33_FLAGS_SKIP_SIZE_CHECK_DISABLE) &&
-        (!portSafeAddU64(pMapParams->offset, pMapParams->length, &mapLimit) ||
-         (mapLimit > pMemoryInfo->Length)))
+    if (!bSkipSizeCheck && (!portSafeAddU64(pMapParams->offset, pMapParams->length, &mapLimit) ||
+                            (mapLimit > pMemoryInfo->Length)))
     {
         return NV_ERR_INVALID_LIMIT;
     }
@@ -429,6 +438,7 @@ memMap_IMPL
                 {
                     busMapFbFlags |= BUS_MAP_FB_FLAGS_DISABLE_ENCRYPTION;
                 }
+
                 switch (pMapParams->protect)
                 {
                     case NV_PROTECT_READABLE:
@@ -440,6 +450,13 @@ memMap_IMPL
                 }
 
                 pMemDesc = memdescGetMemDescFromGpu(pMemDesc, pGpu);
+
+                // WAR for Bug 3564398, need to allocate doorbell for windows differently
+                if (RMCFG_FEATURE_PLATFORM_WINDOWS_LDDM &&
+                    memdescGetFlag(pMemDesc, MEMDESC_FLAGS_MAP_SYSCOH_OVER_BAR1)) 
+                {
+                    busMapFbFlags |= BUS_MAP_FB_FLAGS_MAP_DOWNWARDS;
+                }
 
                 rmStatus = kbusMapFbAperture_HAL(pGpu, pKernelBus,
                                                  pMemDesc, pMapParams->offset,
@@ -487,6 +504,7 @@ memMap_IMPL
         // direct mapping.
         //
         pMapParams->flags = FLD_SET_DRF(OS33, _FLAGS, _MAPPING, _REFLECTED, pMapParams->flags);
+        pMapParams->flags = FLD_SET_DRF_NUM(OS33, _FLAGS, _CACHING_TYPE, cachingType, pMapParams->flags);
 
         if (rmStatus != NV_OK)
             goto _rmMapMemory_pciFail;
@@ -974,10 +992,23 @@ serverUnmap_Prologue
     {
         rmStatus = osAttachToProcess(&pProcessHandle, ProcessId);
         if (rmStatus != NV_OK)
-            return rmStatus;
+        {
+            if (pUnmapParams->bTeardown)
+                pProcessHandle = NULL;
+            else
+                return rmStatus;
+        }
 
         pUnmapParams->pProcessHandle = pProcessHandle;
     }
+
+    // Don't do any filtering if this is a tear-down path
+    if (pUnmapParams->bTeardown)
+    {
+        pUnmapParams->fnFilter = NULL;
+        return NV_OK;
+    }
+
 
     pUnmapParams->fnFilter = bKernel
         ? serverutilMappingFilterKernel
@@ -1048,7 +1079,6 @@ rmapiMapToCpu
     return status;
 }
 
-
 /**
  * Call into Resource Server to register and execute a CPU mapping operation.
  *
@@ -1063,7 +1093,7 @@ rmapiMapToCpu
  *    6. Release any locks taken
  */
 NV_STATUS
-rmapiMapToCpuWithSecInfo
+rmapiMapToCpuWithSecInfoV2
 (
     RM_API            *pRmApi,
     NvHandle           hClient,
@@ -1072,7 +1102,7 @@ rmapiMapToCpuWithSecInfo
     NvU64              offset,
     NvU64              length,
     NvP64             *ppCpuVirtAddr,
-    NvU32              flags,
+    NvU32             *flags,
     API_SECURITY_INFO *pSecInfo
 )
 {
@@ -1086,13 +1116,13 @@ rmapiMapToCpuWithSecInfo
               hDevice, hMemory);
     NV_PRINTF(LEVEL_INFO,
               "Nv04MapMemory:  offset: %llx length: %llx flags:0x%x\n",
-              offset, length, flags);
+              offset, length, *flags);
 
     status = rmapiPrologue(pRmApi, &rmApiContext);
     if (status != NV_OK)
         return status;
 
-    NV_PRINTF(LEVEL_INFO, "MMU_PROFILER Nv04MapMemory 0x%x\n", flags);
+    NV_PRINTF(LEVEL_INFO, "MMU_PROFILER Nv04MapMemory 0x%x\n", *flags);
 
     portMemSet(&lockInfo, 0, sizeof(lockInfo));
     rmapiInitLockInfo(pRmApi, hClient, &lockInfo);
@@ -1109,13 +1139,15 @@ rmapiMapToCpuWithSecInfo
     rmMapParams.offset = offset;
     rmMapParams.length = length;
     rmMapParams.ppCpuVirtAddr = ppCpuVirtAddr;
-    rmMapParams.flags = flags;
+    rmMapParams.flags = *flags;
     rmMapParams.pLockInfo = &lockInfo;
     rmMapParams.pSecInfo = pSecInfo;
 
     status = serverMap(&g_resServ, rmMapParams.hClient, rmMapParams.hMemory, &rmMapParams);
 
     rmapiEpilogue(pRmApi, &rmApiContext);
+
+    *flags = rmMapParams.flags;
 
     if (status == NV_OK)
     {
@@ -1132,6 +1164,25 @@ rmapiMapToCpuWithSecInfo
     }
 
     return status;
+}
+
+NV_STATUS
+rmapiMapToCpuWithSecInfo
+(
+    RM_API            *pRmApi,
+    NvHandle           hClient,
+    NvHandle           hDevice,
+    NvHandle           hMemory,
+    NvU64              offset,
+    NvU64              length,
+    NvP64             *ppCpuVirtAddr,
+    NvU32              flags,
+    API_SECURITY_INFO *pSecInfo
+)
+{
+    return rmapiMapToCpuWithSecInfoV2(pRmApi, hClient, 
+        hDevice, hMemory, offset, length, ppCpuVirtAddr, 
+        &flags, pSecInfo);
 }
 
 NV_STATUS
@@ -1153,7 +1204,32 @@ rmapiMapToCpuWithSecInfoTls
 
     threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
 
-    status = rmapiMapToCpuWithSecInfo(pRmApi, hClient, hDevice, hMemory, offset, length, ppCpuVirtAddr, flags, pSecInfo);
+    status = rmapiMapToCpuWithSecInfoV2(pRmApi, hClient, hDevice, hMemory, offset, length, ppCpuVirtAddr, &flags, pSecInfo);
+
+    threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
+
+    return status;
+}
+NV_STATUS
+rmapiMapToCpuWithSecInfoTlsV2
+(
+    RM_API            *pRmApi,
+    NvHandle           hClient,
+    NvHandle           hDevice,
+    NvHandle           hMemory,
+    NvU64              offset,
+    NvU64              length,
+    NvP64             *ppCpuVirtAddr,
+    NvU32             *flags,
+    API_SECURITY_INFO *pSecInfo
+)
+{
+    THREAD_STATE_NODE threadState;
+    NV_STATUS         status;
+
+    threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
+
+    status = rmapiMapToCpuWithSecInfoV2(pRmApi, hClient, hDevice, hMemory, offset, length, ppCpuVirtAddr, flags, pSecInfo);
 
     threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
 

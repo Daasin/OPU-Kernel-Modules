@@ -50,6 +50,7 @@
 #include "gpu/gsp/message_queue_priv.h"
 #include "msgq/msgq_priv.h"
 #include "gpu/gsp/kernel_gsp.h"
+#include "nvrm_registry.h"
 
 ct_assert(GSP_MSG_QUEUE_HEADER_SIZE > sizeof(msgqTxHeader) + sizeof(msgqRxHeader));
 
@@ -64,11 +65,11 @@ _getMsgQueueParams
     NvU32 numPtes;
     const NvLength defaultCommandQueueSize = 0x40000; // 256 KB
     const NvLength defaultStatusQueueSize  = 0x40000; // 256 KB
+    NvU32 regStatusQueueSize;
 
     if (IS_SILICON(pGpu))
     {
         pMQI->commandQueueSize = defaultCommandQueueSize;
-        pMQI->statusQueueSize = defaultStatusQueueSize;
     }
     else
     {
@@ -77,6 +78,18 @@ _getMsgQueueParams
         // the VBIOS image via RPC.
         //
         pMQI->commandQueueSize = defaultCommandQueueSize * 6;
+    }
+
+    // Check for status queue size overried
+    if (osReadRegistryDword(pGpu, NV_REG_STR_RM_GSP_STATUS_QUEUE_SIZE, &regStatusQueueSize) == NV_OK)
+    {
+        regStatusQueueSize *= 1024; // to bytes
+        regStatusQueueSize = NV_MAX(GSP_MSG_QUEUE_ELEMENT_SIZE_MAX, regStatusQueueSize);
+        regStatusQueueSize = NV_ALIGN_UP(regStatusQueueSize, 1 << GSP_MSG_QUEUE_ALIGN);
+        pMQI->statusQueueSize = regStatusQueueSize;
+    }
+    else
+    {
         pMQI->statusQueueSize = defaultStatusQueueSize;
     }
 
@@ -267,7 +280,7 @@ NV_STATUS GspStatusQueueInit(OBJGPU *pGpu, MESSAGE_QUEUE_INFO **ppMQI)
     int        nRet = 0;
     int        nRetries;
     RMTIMEOUT  timeout;
-    NvU32      timeoutUs = 2000000;
+    NvU32      timeoutUs = 4000000;
     NvU32      timeoutFlags = GPU_TIMEOUT_FLAGS_DEFAULT;
     KernelGsp *pKernelGsp = GPU_GET_KERNEL_GSP(pGpu);
 
@@ -290,7 +303,7 @@ NV_STATUS GspStatusQueueInit(OBJGPU *pGpu, MESSAGE_QUEUE_INFO **ppMQI)
 
     gpuSetTimeout(pGpu, timeoutUs, &timeout, timeoutFlags);
 
-    // Wait other end of the queue to run msgqInit.  Retry for up to 10 ms.
+    // Wait other end of the queue to run msgqInit.  Retry until the timeout.
     for (nRetries = 0; ; nRetries++)
     {
         // Link in status queue
@@ -430,7 +443,7 @@ NV_STATUS GspMsgQueueSendCommand(MESSAGE_QUEUE_INFO *pMQI, OBJGPU *pGpu)
     if ((uElementSize & 7) != 0)
         portMemSet(pSrc + uElementSize, 0, 8 - (uElementSize & 7));
 
-    pCQE->seqNum   = pMQI->txSeqNum++;
+    pCQE->seqNum   = pMQI->txSeqNum;
     pCQE->checkSum = 0;
     pCQE->checkSum = _checkSum32(pSrc, uElementSize);
 
@@ -489,6 +502,9 @@ NV_STATUS GspMsgQueueSendCommand(MESSAGE_QUEUE_INFO *pMQI, OBJGPU *pGpu)
         goto done;
     }
 
+    // Advance seq num only if we actually used it.
+    pMQI->txSeqNum++;
+
     nvStatus = NV_OK;
 
 done:
@@ -514,11 +530,13 @@ NV_STATUS GspMsgQueueReceiveStatus(MESSAGE_QUEUE_INFO *pMQI)
     int         nRet;
     int         i;
     int         nRetries;
+    int         nMaxRetries  = 3;
     int         nElements    = 1;  // Assume record fits in one 256-byte queue element for now.
     NvU32       uElementSize = 0;
+    NvU32       seqMismatchDiff = NV_U32_MAX;
     NV_STATUS   nvStatus     = NV_OK;
 
-    for (nRetries = 0; nRetries < 3; nRetries++)
+    for (nRetries = 0; nRetries < nMaxRetries; nRetries++)
     {
         pTgt      = (NvU8 *)pMQI->pCmdQueueElement;
         nvStatus  = NV_OK;
@@ -587,10 +605,29 @@ NV_STATUS GspMsgQueueReceiveStatus(MESSAGE_QUEUE_INFO *pMQI)
 
         // Retry if sequence number is wrong.
         if (pMQI->pCmdQueueElement->seqNum != pMQI->rxSeqNum)
-
         {
-            NV_PRINTF(LEVEL_ERROR, "Bad sequence number.  Expected %u got %u.\n",
+            NV_PRINTF(LEVEL_ERROR, "Bad sequence number.  Expected %u got %u. Possible memory corruption.\n",
                 pMQI->rxSeqNum, pMQI->pCmdQueueElement->seqNum);
+
+            // If we read an old piece of data, try to ignore it and move on..
+            if (pMQI->pCmdQueueElement->seqNum < pMQI->rxSeqNum)
+            {
+                // Make sure we're converging to the desired pMQI->rxSeqNum
+                if ((pMQI->rxSeqNum - pMQI->pCmdQueueElement->seqNum) < seqMismatchDiff)
+                {
+                    NV_PRINTF(LEVEL_ERROR, "Attempting recovery: ignoring old package with seqNum=%u of %u elements.\n",
+                        pMQI->pCmdQueueElement->seqNum, nElements);
+
+                    seqMismatchDiff = pMQI->rxSeqNum - pMQI->pCmdQueueElement->seqNum;
+                    nRet = msgqRxMarkConsumed(pMQI->hQueue, nElements);
+                    if (nRet < 0)
+                    {
+                        NV_PRINTF(LEVEL_ERROR, "msgqRxMarkConsumed failed: %d\n", nRet);
+                    }
+                    nMaxRetries++;
+                }
+            }
+
             nvStatus = NV_ERR_INVALID_DATA;
             continue;
         }

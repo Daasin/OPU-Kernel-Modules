@@ -25,6 +25,7 @@
 #if defined(SRT_BUILD)
 #include "shrdebug.h"
 #endif
+
 #include "mmu_walk_private.h"
 
 /* ------------------------ Static Function Prototypes ---------------------- */
@@ -108,6 +109,8 @@ mmuWalkReleaseEntries
 {
     MMU_WALK_OP_PARAMS   opParams = {0};
     NV_STATUS            status   = NV_OK;
+
+    NV_ASSERT_OR_RETURN(NULL != pWalk, NV_ERR_INVALID_ARGUMENT);
 
     NV_ASSERT_OR_RETURN(NULL != mmuWalkFindLevel(pWalk, pLevelFmt),
                      NV_ERR_INVALID_ARGUMENT);

@@ -66,11 +66,6 @@
 #define NV_DP_DSC_MST_CAP_BUG_3143315                  "DP_DSC_MST_CAP_BUG_3143315"
 
 //
-// Enable DSC Pass through support in MST mode.
-//
-#define NV_DP_DSC_MST_ENABLE_PASS_THROUGH              "DP_DSC_MST_ENABLE_PASS_THROUGH"
-
-//
 // Data Base used to store all the regkey values.
 // The actual data base is declared statically in dp_evoadapter.cpp.
 // All entries set to 0 before initialized by the first EvoMainLink constructor.
@@ -101,7 +96,6 @@ struct DP_REGKEY_DATABASE
     bool  bOptLinkKeptAliveSst;
     bool  bBypassEDPRevCheck;
     bool  bDscMstCapBug3143315;
-    bool  bDscMstEnablePassThrough;
 };
 
 #endif //INCLUDED_DP_REGKEYDATABASE_H

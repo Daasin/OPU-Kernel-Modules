@@ -81,6 +81,7 @@ DeviceImpl::DeviceImpl(DPCDHAL * hal, ConnectorImpl * connector, DeviceImpl * pa
       activeGroup(0),
       connector(connector),
       address(),
+      bVirtualPeerDevice(false),
       plugged(false),
       friendlyAux(this),
       isHDCPCap(False),
@@ -90,7 +91,10 @@ DeviceImpl::DeviceImpl(DPCDHAL * hal, ConnectorImpl * connector, DeviceImpl * pa
       bIsFakedMuxDevice(false),
       bIsPreviouslyFakedMuxDevice(false),
       bisMarkedForDeletion(false),
-      bSdpExtCapable(Indeterminate)
+      bIgnoreMsaCap(false),
+      bIgnoreMsaCapCached(false),
+      bSdpExtCapable(Indeterminate),
+      bDscPassThroughColorFormatWar(false)
 {
     bandwidth.enum_path.dataValid = false;
     shadow.plugged = false;
@@ -920,6 +924,7 @@ void DeviceImpl::applyOUIOverrides()
                     (buffer[8] == 0x31 || buffer[8] == 0x20))
                 {
                     this->bSdpExtCapable = False;
+                    this->bDscPassThroughColorFormatWar = true;
 
                     //
                     // Check firmware version
@@ -1025,7 +1030,7 @@ bool DeviceImpl::getSDPExtnForColorimetrySupported()
                                                 _YES, byte) ? True : False;
         }
     }
-    this->applyOUIOverrides();
+
     if (parentDevice && (this->bSdpExtCapable == True))
     {
         //
@@ -1445,6 +1450,8 @@ NvBool DeviceImpl::getDSCSupport()
     NvU8 byte          = 0;
     unsigned size      = 0;
     unsigned nakReason = NakUndefined;
+    Address::StringBuffer sb;
+    DP_USED(sb);
 
     dscCaps.bDSCSupported = false;
 
@@ -1455,11 +1462,11 @@ NvBool DeviceImpl::getDSCSupport()
         {
             dscCaps.bDSCSupported = true;
         }
+    }
 
-        if (FLD_TEST_DRF(_DPCD20, _DSC_SUPPORT, _PASS_THROUGH_SUPPORT, _YES, byte))
-        {
-            dscCaps.bDSCPassThroughSupported = true;
-        }
+    else
+    {
+        DP_LOG(("DP-DEV> DSC Support AUX READ failed for %s!", address.toString(sb)));
     }
 
     return dscCaps.bDSCSupported;
@@ -1508,6 +1515,47 @@ bool DeviceImpl::setPanelReplayConfig(panelReplayConfig prcfg)
     }
 
     return false;
+}
+
+bool DeviceImpl::getPanelReplayStatus(PanelReplayStatus *pPrStatus)
+{
+    NvU8 state = 0;
+    unsigned size = 0;
+    unsigned nakReason = NakUndefined;
+
+    if (pPrStatus == NULL)
+    {
+        DP_ASSERT(0);
+        return false;
+    }
+
+    if(AuxBus::success == this->getDpcdData(NV_DPCD20_PANEL_REPLAY_AND_FRAME_LOCK_STATUS,
+        &state, sizeof(state), &size, &nakReason))
+    {
+        switch (DRF_VAL(_DPCD20, _PANEL_REPLAY_AND_FRAME_LOCK_STATUS, _PR_STATUS, state))
+        {
+            case NV_DPCD20_PANEL_REPLAY_AND_FRAME_LOCK_STATUS_PR_STATUS_STATE_0:
+            pPrStatus->prState = PanelReplay_Inactive;
+            break;
+
+            case NV_DPCD20_PANEL_REPLAY_AND_FRAME_LOCK_STATUS_PR_STATUS_STATE_1:
+            pPrStatus->prState = PanelReplay_CaptureAndDisplay;
+            break;
+
+            case NV_DPCD20_PANEL_REPLAY_AND_FRAME_LOCK_STATUS_PR_STATUS_STATE_2:
+            pPrStatus->prState = PanelReplay_DisplayFromRfb;
+            break;
+
+            default:
+            pPrStatus->prState = PanelReplay_Undefined;
+            break;
+        }
+        return true;
+    }
+    else
+    {    
+        return false;
+    }
 }
 
 bool DeviceImpl::getFECSupport()
@@ -1562,6 +1610,11 @@ bool DeviceImpl::parseDscCaps(const NvU8 *buffer, NvU32 bufferSize)
     {
         DP_LOG((" DSC caps buffer must be greater than or equal to 16"));
         return false;
+    }
+
+    if (FLD_TEST_DRF(_DPCD20, _DSC_SUPPORT, _PASS_THROUGH_SUPPORT, _YES, buffer[0x0]))
+    {
+        dscCaps.bDSCPassThroughSupported = true;
     }
 
     dscCaps.versionMajor = DRF_VAL(_DPCD14, _DSC_ALGORITHM_REVISION, _MAJOR, buffer[0x1]);
@@ -1687,20 +1740,103 @@ bool DeviceImpl::parseDscCaps(const NvU8 *buffer, NvU32 bufferSize)
     return true;
 }
 
+bool DeviceImpl::parseBranchSpecificDscCaps(const NvU8 *buffer, NvU32 bufferSize)
+{
+    if (bufferSize < 3)
+    {
+        DP_LOG((" Branch DSC caps buffer must be greater than or equal to 3"));
+        return false;
+    }
+
+    dscCaps.branchDSCOverallThroughputMode0 = DRF_VAL(_DPCD20, _BRANCH_DSC_OVERALL_THROUGHPUT_MODE_0, _VALUE, buffer[0x0]);
+    if (dscCaps.branchDSCOverallThroughputMode0 == 1)
+    {
+        dscCaps.branchDSCOverallThroughputMode0 = 680;
+    }
+    else if (dscCaps.branchDSCOverallThroughputMode0 >= 2)
+    {
+        dscCaps.branchDSCOverallThroughputMode0 = 600 + dscCaps.branchDSCOverallThroughputMode0 * 50;
+    }
+
+    dscCaps.branchDSCOverallThroughputMode1 = DRF_VAL(_DPCD20, _BRANCH_DSC_OVERALL_THROUGHPUT_MODE_1, _VALUE, buffer[0x1]);
+    if (dscCaps.branchDSCOverallThroughputMode1 == 1)
+    {
+        dscCaps.branchDSCOverallThroughputMode1 = 680;
+    }
+    else if (dscCaps.branchDSCOverallThroughputMode1 >= 2)
+    {
+        dscCaps.branchDSCOverallThroughputMode1 = 600 + dscCaps.branchDSCOverallThroughputMode1 * 50;
+    }
+
+    dscCaps.branchDSCMaximumLineBufferWidth = DRF_VAL(_DPCD20, _BRANCH_DSC_MAXIMUM_LINE_BUFFER_WIDTH, _VALUE, buffer[0x2]);
+    if (dscCaps.branchDSCMaximumLineBufferWidth != 0)
+    {
+        if (dscCaps.branchDSCMaximumLineBufferWidth >= 16)
+        {
+            dscCaps.branchDSCMaximumLineBufferWidth = dscCaps.branchDSCMaximumLineBufferWidth * 320;
+        }
+        else
+        {
+            dscCaps.branchDSCMaximumLineBufferWidth = 0;
+            DP_LOG(("Value of branch DSC maximum line buffer width is invalid, so setting it to 0."));
+        }
+    }
+    return true;
+}
+
 bool DeviceImpl::readAndParseDSCCaps()
 {
     // Allocate a buffer of 16 bytes to read DSC caps
 
     unsigned sizeCompleted  = 0;
     unsigned nakReason      = NakUndefined;
+    Address::StringBuffer sb;
+    DP_USED(sb);
 
     if(AuxBus::success != this->getDpcdData(NV_DPCD14_DSC_SUPPORT,
         &rawDscCaps[0], sizeof(rawDscCaps), &sizeCompleted, &nakReason))
     {
+        DP_LOG(("DP-DEV> Error querying DSC Caps on %s!", this->address.toString(sb)));
         return false;
     }
 
     return parseDscCaps(&rawDscCaps[0], sizeof(rawDscCaps));
+}
+
+bool DeviceImpl::readAndParseBranchSpecificDSCCaps()
+{
+    unsigned sizeCompleted = 0;
+    unsigned nakReason = NakUndefined;
+    NvU8 rawBranchSpecificDscCaps[3];
+
+    if(AuxBus::success != this->getDpcdData(NV_DPCD20_BRANCH_DSC_OVERALL_THROUGHPUT_MODE_0,
+        &rawBranchSpecificDscCaps[0], sizeof(rawBranchSpecificDscCaps), &sizeCompleted, &nakReason))
+    {
+        return false;
+    }
+
+    return parseBranchSpecificDscCaps(&rawBranchSpecificDscCaps[0], sizeof(rawBranchSpecificDscCaps));
+}
+
+void DeviceImpl::queryGUID2()
+{
+    unsigned sizeCompleted  = 0;
+    unsigned nakReason      = NakUndefined;
+    Address::StringBuffer sb;
+    DP_USED(sb);
+
+    if(AuxBus::success == this->getDpcdData(NV_DPCD20_GUID_2,
+        &this->guid2.data[0], DPCD_GUID_SIZE, &sizeCompleted, &nakReason))
+    {
+        if (!(this->guid2.isGuidZero()))
+        {
+            this->bVirtualPeerDevice = true;
+        }
+    }
+    else
+    {
+        DP_LOG(("DP-DEV> Error querying GUID2 on %s!", this->address.toString(sb)));
+    }
 }
 
 bool DeviceImpl::getDscEnable(bool *pEnable)
@@ -1726,7 +1862,7 @@ bool DeviceImpl::getDscEnable(bool *pEnable)
 
     if (status != AuxBus::success)
     {
-        DP_LOG(("DP> Error querying DSC Enable State!"));
+        DP_LOG(("DP-DEV> Error querying DSC Enable State!"));
         return false;
     }
 
@@ -1734,13 +1870,111 @@ bool DeviceImpl::getDscEnable(bool *pEnable)
     return true;
 }
 
+void DeviceImpl::setDscDecompressionDevice(bool bDscCapBasedOnParent)
+{
+    // Decide if DSC stream can be sent to new device
+    this->bDSCPossible = false;
+    this->devDoingDscDecompression = NULL;
+
+    if (this->multistream)
+    {
+        if ((this->peerDevice == Dongle) &&
+            (this->dpcdRevisionMajor != 0) &&
+            !bDscCapBasedOnParent)
+        {
+            // For Peer Type 4 device with LAM DPCD rev != 0.0, check only the device's own DSC capability.
+            if (this->isDSCSupported())
+            {
+                this->bDSCPossible = true;
+                this->devDoingDscDecompression = this;
+            }
+        }
+        else
+        {
+            //
+            // Check the device's own and its parent's DSC capability. 
+            // - Sink device will do DSC cecompression when 
+            //       1. Sink device is capable of DSC decompression
+            //       2. Sink is on a logical port (8-15)
+            //
+            //       OR
+            //
+            //       1. Sink device is capable of DSC decompression
+            //       2. Parent of sink is a Virtual Peer device
+            //       3. Parent of sink supports DSC Pass through
+            //
+            // - Sink device's parent will do DSC decompression 
+            //       1. Above conditions are not true.
+            //       2. Parent of sink supports DSC decompression.
+            //
+            if (this->isDSCSupported())
+            {
+                if (this->isVideoSink() && this->getParent() != NULL)
+                {
+                    if (this->isLogical())
+                    {
+                        this->devDoingDscDecompression = this;
+                        this->bDSCPossible = true;
+                    }
+                    else if (this->parent->isVirtualPeerDevice() && 
+                             this->parent->isDSCPassThroughSupported())
+                    {
+                        //
+                        // This condition takes care of DSC capable sink devices 
+                        // connected behind a DSC Pass through capable branch
+                        //
+                        this->devDoingDscDecompression = this;
+                        this->bDSCPossible = true;
+                    }
+                    else if (this->parent->isDSCSupported())
+                    {
+                        //
+                        // This condition takes care of DSC capable sink devices 
+                        // connected behind a branch device that is not capable
+                        // of DSC pass through but can do DSC decompression.
+                        //
+                        this->bDSCPossible = true;
+                        this->devDoingDscDecompression = this->parent;                        
+                    }
+                }
+                else
+                {
+                    // This condition takes care of branch device capable of DSC.
+                    this->devDoingDscDecompression = this;
+                    this->bDSCPossible = true;
+                }
+            }           
+            else if (this->parent && this->parent->isDSCSupported())
+            {
+                //
+                // This condition takes care of sink devices not capable of DSC 
+                // but parent is capable of DSC decompression.
+                //
+                this->bDSCPossible = true;
+                this->devDoingDscDecompression = this->parent;
+            }
+        }
+    }
+    else
+    {
+        if (this->isDSCSupported())
+        {
+            this->bDSCPossible = true;
+            this->devDoingDscDecompression = this;
+        }
+    }
+}
+
 bool DeviceImpl::setDscEnable(bool enable)
 {
-    NvU8 byte            = 0;
+    NvU8 dscEnableByte = 0; 
+    NvU8 dscPassthroughByte = 0;
     unsigned size        = 0;
     unsigned nakReason   = NakUndefined;
     bool bCurrDscEnable  = false;
     bool bDscPassThrough = false;
+    AuxBus::status dscEnableStatus      = AuxBus::success;
+    AuxBus::status dscPassThroughStatus = AuxBus::success;
     Address::StringBuffer buffer;
     DP_USED(buffer);
 
@@ -1750,95 +1984,152 @@ bool DeviceImpl::setDscEnable(bool enable)
         return false;
     }
 
-    if ((this->devDoingDscDecompression == this) && this->parent != NULL && this->connector->bDscMstEnablePassThrough)
+    if ((this->devDoingDscDecompression == this) && !this->isLogical() && this->parent != NULL)
     {
         //
         // If the device has a parent, that means the sink is on a MST link and
         // and on a MST link if DSC is possible on the path and devDoingDscDecompression 
-        // is the sink itself, then the parent should be DSC Pass through capable..
+        // is the sink itself and sink is not on a logical port, then the parent should be 
+        // DSC Pass through capable.
         //
         bDscPassThrough = true;
     }
-    else
+
+    //
+    // Get Current DSC Enable State
+    // Ideally we don't need to check the current state but Synaptics DSC device,
+    // which was used for inital DSC code developement did not follow spec and so
+    // we have added this code. Overwriting the same value should not have any 
+    // impact as per the spec. Will remove this check once all DSC devices follow spec.
+    //
+    if (!getDscEnable(&bCurrDscEnable))
     {
-        //
-        // Get Current DSC Enable State
-        // Ideally we don't need to check the current state but Synaptics DSC device,
-        // which was used for inital DSC code developement did not follow spec and so
-        // we have added this code. Overwriting the same value should not have any 
-        // impact as per the spec. Will remove this check once all DSC devices follow spec.
-        //
-        if (!getDscEnable(&bCurrDscEnable))
-        {
-            DP_LOG(("DP> Not able to get DSC Enable State!"));
-            return false;
-        }
+        DP_LOG(("DP-DEV> Not able to get DSC Enable State!"));
+        return false;
     }
 
     if(enable)
     {
         if(bDscPassThrough)
         {
-            byte = FLD_SET_DRF(_DPCD20, _DSC_PASS_THROUGH, _ENABLE, _YES, byte);
+            dscPassthroughByte = FLD_SET_DRF(_DPCD20, _DSC_PASS_THROUGH, _ENABLE, _YES, dscPassthroughByte);
             DP_LOG(("DP-DEV> Enabling DSC Pass through on branch device - %s",
-                    this->parent->getTopologyAddress().toString(buffer)));          
+                    this->parent->getTopologyAddress().toString(buffer)));
+        }
+
+        if (!bCurrDscEnable)
+        {
+            dscEnableByte = FLD_SET_DRF(_DPCD14, _DSC_ENABLE, _SINK, _YES, dscEnableByte);
+            DP_LOG(("DP-DEV> Enabling DSC decompression on device - %s",
+                    this->devDoingDscDecompression->getTopologyAddress().toString(buffer)));
         }
         else
         {
-            if (!bCurrDscEnable)
-            {
-                byte = FLD_SET_DRF(_DPCD14, _DSC_ENABLE, _SINK, _YES, byte);
-                DP_LOG(("DP-DEV> Enabling DSC decompression on device - %s",
-                        this->devDoingDscDecompression->getTopologyAddress().toString(buffer)));
-            }
-            else
-            {
-                DP_LOG(("DP-DEV> DSC decompression is already enabled on device - %s", 
-                        this->devDoingDscDecompression->getTopologyAddress().toString(buffer)));
-                return true;
-            }
+            DP_LOG(("DP-DEV> DSC decompression is already enabled on device - %s", 
+                    this->devDoingDscDecompression->getTopologyAddress().toString(buffer)));
         }
     }
     else
     {
         if(bDscPassThrough)
         {
-            byte = FLD_SET_DRF(_DPCD20, _DSC_PASS_THROUGH, _ENABLE, _NO, byte);
+            dscPassthroughByte = FLD_SET_DRF(_DPCD20, _DSC_PASS_THROUGH, _ENABLE, _NO, dscPassthroughByte);
             DP_LOG(("DP-DEV> Disabling DSC Pass through on branch device - %s",
                     this->parent->getTopologyAddress().toString(buffer)));
         }
+
+        if (bCurrDscEnable)
+        {
+            dscEnableByte = FLD_SET_DRF(_DPCD14, _DSC_ENABLE, _SINK, _NO, dscEnableByte);
+            DP_LOG(("DP-DEV> Disabling DSC decompression on device - %s",
+                    this->devDoingDscDecompression->getTopologyAddress().toString(buffer)));
+        }
         else
         {
-            if (bCurrDscEnable)
-            {
-                byte = FLD_SET_DRF(_DPCD14, _DSC_ENABLE, _SINK, _NO, byte);
-                DP_LOG(("DP-DEV> Disabling DSC decompression on device - %s",
-                        this->devDoingDscDecompression->getTopologyAddress().toString(buffer)));
-            }
-            else
-            {
-                DP_LOG(("DP-DEV> DSC decompression is already disabled on device - %s", 
-                        this->devDoingDscDecompression->getTopologyAddress().toString(buffer)));
-                return true;
-            }            
+            DP_LOG(("DP-DEV> DSC decompression is already disabled on device - %s", 
+                    this->devDoingDscDecompression->getTopologyAddress().toString(buffer)));
         }
     }
 
     if (bDscPassThrough)
     {
-        //
-        // When sink is DSC decompression capable and parent is DSC pass through capable 
-        // source needs to only enable DSC pass through on the parent branch and parent 
-        // branch will take care of enabling DSC decompression on the sink.
-        //
-        return (!this->parent->setDpcdData(NV_DPCD20_DSC_PASS_THROUGH,
-            &byte, sizeof byte, &size, &nakReason));
+        dscPassThroughStatus = this->parent->setDpcdData(NV_DPCD20_DSC_PASS_THROUGH, 
+                                   &dscPassthroughByte, sizeof dscPassthroughByte, &size, &nakReason);
+        if (dscPassThroughStatus != AuxBus::success)
+        {
+            DP_LOG(("DP-DEV> Setting DSC Passthrough on parent branch %s failed", 
+                    this->parent->getTopologyAddress().toString(buffer)));
+        }
+    }
+
+    if (enable != bCurrDscEnable)
+    {
+        dscEnableStatus = this->devDoingDscDecompression->setDpcdData(NV_DPCD14_DSC_ENABLE,
+                              &dscEnableByte, sizeof dscEnableByte, &size, &nakReason);
+        if (dscEnableStatus != AuxBus::success)
+        {
+            DP_LOG(("DP-DEV> Setting DSC Enable on sink %s failed", 
+                    this->devDoingDscDecompression->getTopologyAddress().toString(buffer)));
+ 
+        }
+    }
+
+    if ((dscPassThroughStatus != AuxBus::success) || (dscEnableStatus != AuxBus::success))
+    {
+        return false;
     }
     else
     {
-        return (!this->devDoingDscDecompression->setDpcdData(NV_DPCD14_DSC_ENABLE,
-            &byte, sizeof byte, &size, &nakReason));
+        return true;
     }
+}
+
+
+
+bool DeviceImpl::setDscEnableDPToHDMIPCON(bool bDscEnable, bool bEnablePassThroughForPCON)
+{
+    NvU8 dscEnableByte              = 0; 
+    unsigned size                   = 0;
+    unsigned nakReason              = NakUndefined;
+    AuxBus::status dscEnableStatus  = AuxBus::success;
+    Address::StringBuffer buffer;
+    DP_USED(buffer);
+
+    if (!this->isDSCPossible())
+    {
+        DP_LOG(("DP-DEV> DSC is not supported on DP to HDMI PCON - %s"));
+        return false;
+    }
+
+    if (bDscEnable)
+    {
+        if(bEnablePassThroughForPCON)
+        {
+            dscEnableByte = FLD_SET_DRF(_DPCD20, _DSC_PASS_THROUGH, _ENABLE, _YES, dscEnableByte);
+            DP_LOG(("DP-DEV> Enabling DSC Pass through on DP to HDMI PCON device - %s",
+                    this->getTopologyAddress().toString(buffer)));
+        }
+        else
+        {
+            dscEnableByte = FLD_SET_DRF(_DPCD14, _DSC_ENABLE, _SINK, _YES, dscEnableByte);
+            DP_LOG(("DP-DEV> Enabling DSC decompression on DP to HDMI PCON device - %s",
+                    this->getTopologyAddress().toString(buffer)));
+        }
+
+    }
+
+    dscEnableStatus = this->setDpcdData(NV_DPCD14_DSC_ENABLE,
+                              &dscEnableByte, sizeof dscEnableByte, &size, &nakReason);
+
+    if (dscEnableStatus != AuxBus::success)
+    {
+        DP_LOG(("DP-DEV> Setting DSC Enable on DP to HDMI PCON %s failed", 
+                this->getTopologyAddress().toString(buffer)));
+        return false;
+ 
+    }
+
+    return true;
 }
 
 unsigned DeviceImpl::getDscVersionMajor()
@@ -2054,6 +2345,124 @@ bool DeviceImpl::getPCONCaps(PCONCaps *pPCONCaps)
     return true;
 }
 
+bool DeviceImpl::getIgnoreMSACap()
+{
+    NvU8 byte = 0;
+    unsigned size = 0;
+    unsigned nakReason = NakUndefined;
+    AuxBus::status status;
+
+    if (bIgnoreMsaCapCached)
+    {
+        return bIgnoreMsaCap;
+    }
+
+    if (this->isMultistream())
+    {
+        status = this->getDpcdData(NV_DPCD_DOWN_STREAM_PORT,
+                                   &byte, sizeof byte, &size, &nakReason);
+        if (status == AuxBus::success)
+        {
+            if(FLD_TEST_DRF(_DPCD, _DOWN_STREAM_PORT, _MSA_TIMING_PAR_IGNORED, _YES, byte))
+            {
+                if (this->parent && this->parent->isVirtualPeerDevice())
+                {
+                    byte = 0;
+                    size = 0;
+                    nakReason = NakUndefined;
+
+                    status = this->parent->getDpcdData(NV_DPCD_DOWN_STREAM_PORT,
+                                                       &byte, sizeof byte, &size, &nakReason);
+                    if (status == AuxBus::success)
+                    {
+                        if(FLD_TEST_DRF(_DPCD, _DOWN_STREAM_PORT, _MSA_TIMING_PAR_IGNORED, _YES, byte))
+                        {
+                            bIgnoreMsaCap = true;
+                        }
+                        else
+                        {
+                            bIgnoreMsaCap = false;
+                        }
+                        bIgnoreMsaCapCached = true;
+                    }
+                    else
+                    {
+                        DP_LOG(("DP-DEV> Aux Read from DPCD offset 0x7 failed!"));
+                        return false;
+                    }
+                }
+                else
+                {
+                    bIgnoreMsaCap = true;
+                    bIgnoreMsaCapCached = true;
+                }
+            }
+            else
+            {
+                bIgnoreMsaCap = false;
+                bIgnoreMsaCapCached = true;
+            }
+        }
+        else
+        {
+            DP_LOG(("DP-DEV> Aux Read from DPCD offset 0x7 failed!"));
+            return false;
+        }
+    }
+    else
+    {
+        bIgnoreMsaCap = hal->getMsaTimingparIgnored();
+        bIgnoreMsaCapCached = true;
+    }
+
+    return bIgnoreMsaCap;
+}
+
+AuxRetry::status  DeviceImpl::setIgnoreMSAEnable(bool msaTimingParamIgnoreEn)
+{
+    NvU8 byte = 0;
+    unsigned size = 0;
+    unsigned nakReason = NakUndefined;
+    AuxBus::status status;
+
+    if (this->isMultistream())
+    {
+        status = this->getDpcdData(NV_DPCD_DOWNSPREAD_CTRL,
+                                   &byte, sizeof byte, &size, &nakReason);
+        if (status == AuxBus::success)
+        {
+            if (msaTimingParamIgnoreEn)
+            {
+                byte = FLD_SET_DRF(_DPCD, _DOWNSPREAD_CTRL, _MSA_TIMING_PAR_IGNORED, _TRUE, byte);
+            }
+            else
+            {
+                byte = FLD_SET_DRF(_DPCD, _DOWNSPREAD_CTRL, _MSA_TIMING_PAR_IGNORED, _FALSE, byte);
+            }
+
+            status = this->setDpcdData(NV_DPCD_DOWNSPREAD_CTRL,
+                                       &byte, sizeof byte, &size, &nakReason);
+            if (status == AuxBus::success)
+            {
+                return AuxRetry::ack;
+            }
+            else
+            {
+                DP_LOG(("DP-DEV> Aux Write to DPCD offset 0x107 failed!"));
+                return AuxRetry::nack;
+            }
+        }
+        else
+        {
+            DP_LOG(("DP-DEV> Aux Read from DPCD offset 0x7 failed!"));
+            return AuxRetry::nack;
+        }
+    }
+    else
+    {
+        return hal->setIgnoreMSATimingParamters(msaTimingParamIgnoreEn);
+    }
+}
 
 void
 DeviceHDCPDetection::start()

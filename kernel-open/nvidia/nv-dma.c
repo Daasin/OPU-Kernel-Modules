@@ -25,12 +25,15 @@
 
 #include "os-interface.h"
 #include "nv-linux.h"
+#include "nv-reg.h"
 
 #define NV_DMA_DEV_PRINTF(debuglevel, dma_dev, format, ... )                \
     nv_printf(debuglevel, "NVRM: %s: " format,                              \
               (((dma_dev) && ((dma_dev)->dev)) ? dev_name((dma_dev)->dev) : \
                                                  NULL),                     \
               ## __VA_ARGS__)
+
+NvU32 nv_dma_remap_peer_mmio = NV_DMA_REMAP_PEER_MMIO_ENABLE;
 
 NV_STATUS   nv_create_dma_map_scatterlist (nv_dma_map_t *dma_map);
 void        nv_destroy_dma_map_scatterlist(nv_dma_map_t *dma_map);
@@ -194,8 +197,7 @@ NV_STATUS nv_create_dma_map_scatterlist(nv_dma_map_t *dma_map)
             break;
         }
 
-#if !defined(NV_SG_ALLOC_TABLE_FROM_PAGES_PRESENT) || \
-    defined(NV_DOM0_KERNEL_PRESENT)
+#if defined(NV_DOM0_KERNEL_PRESENT)
         {
             NvU64 page_idx = NV_DMA_SUBMAP_IDX_TO_PAGE_IDX(i);
             nv_fill_scatterlist(submap->sgt.sgl,
@@ -766,14 +768,21 @@ NV_STATUS NV_API_CALL nv_dma_unmap_alloc
     return status;
 }
 
-static NvBool nv_dma_is_map_resource_implemented
+static NvBool nv_dma_use_map_resource
 (
     nv_dma_device_t *dma_dev
 )
 {
 #if defined(NV_DMA_MAP_RESOURCE_PRESENT)
     const struct dma_map_ops *ops = get_dma_ops(dma_dev->dev);
+#endif
 
+    if (nv_dma_remap_peer_mmio == NV_DMA_REMAP_PEER_MMIO_DISABLE)
+    {
+        return NV_FALSE;
+    }
+
+#if defined(NV_DMA_MAP_RESOURCE_PRESENT)
     if (ops == NULL)
     {
         /* On pre-5.0 kernels, if dma_map_resource() is present, then we
@@ -798,13 +807,14 @@ NV_STATUS NV_API_CALL nv_dma_map_peer
 (
     nv_dma_device_t *dma_dev,
     nv_dma_device_t *peer_dma_dev,
-    NvU8             bar_index,
+    NvU8             nv_bar_index,
     NvU64            page_count,
     NvU64           *va
 )
 {
     struct pci_dev *peer_pci_dev = to_pci_dev(peer_dma_dev->dev);
     struct resource *res;
+    NvU8 bar_index;
     NV_STATUS status;
 
     if (peer_pci_dev == NULL)
@@ -814,7 +824,7 @@ NV_STATUS NV_API_CALL nv_dma_map_peer
         return NV_ERR_INVALID_REQUEST;
     }
 
-    BUG_ON(bar_index >= NV_GPU_NUM_BARS);
+    bar_index = nv_bar_index_to_os_bar_index(peer_pci_dev, nv_bar_index);
     res = &peer_pci_dev->resource[bar_index];
     if (res->start == 0)
     {
@@ -833,7 +843,7 @@ NV_STATUS NV_API_CALL nv_dma_map_peer
         return NV_ERR_INVALID_REQUEST;
     }
 
-    if (nv_dma_is_map_resource_implemented(dma_dev))
+    if (nv_dma_use_map_resource(dma_dev))
     {
         status = nv_dma_map_mmio(dma_dev, page_count, va);
     }
@@ -858,7 +868,7 @@ void NV_API_CALL nv_dma_unmap_peer
     NvU64            va
 )
 {
-    if (nv_dma_is_map_resource_implemented(dma_dev))
+    if (nv_dma_use_map_resource(dma_dev))
     {
         nv_dma_unmap_mmio(dma_dev, page_count, va);
     }
@@ -873,29 +883,28 @@ NV_STATUS NV_API_CALL nv_dma_map_mmio
 )
 {
 #if defined(NV_DMA_MAP_RESOURCE_PRESENT)
-    NvU64 mmio_addr;
-
     BUG_ON(!va);
 
-    mmio_addr = *va;
-
-    *va = dma_map_resource(dma_dev->dev, mmio_addr, page_count * PAGE_SIZE,
-                           DMA_BIDIRECTIONAL, 0);
-    if (dma_mapping_error(dma_dev->dev, *va))
+    if (nv_dma_use_map_resource(dma_dev))
     {
-        NV_DMA_DEV_PRINTF(NV_DBG_ERRORS, dma_dev,
-                "Failed to DMA map MMIO range [0x%llx-0x%llx]\n",
-                mmio_addr, mmio_addr + page_count * PAGE_SIZE - 1);
-        return NV_ERR_OPERATING_SYSTEM;
+        NvU64 mmio_addr = *va;
+        *va = dma_map_resource(dma_dev->dev, mmio_addr, page_count * PAGE_SIZE,
+                               DMA_BIDIRECTIONAL, 0);
+        if (dma_mapping_error(dma_dev->dev, *va))
+        {
+            NV_DMA_DEV_PRINTF(NV_DBG_ERRORS, dma_dev,
+                    "Failed to DMA map MMIO range [0x%llx-0x%llx]\n",
+                    mmio_addr, mmio_addr + page_count * PAGE_SIZE - 1);
+            return NV_ERR_OPERATING_SYSTEM;
+        }
     }
-
-    /*
-     * The default implementation passes through the source address
-     * without failing. Adjust it using the DMA start address to keep RM's
-     * validation schemes happy.
-     */
-    if (!nv_dma_is_map_resource_implemented(dma_dev))
+    else
     {
+        /*
+         * If dma_map_resource is not available, pass through the source address
+         * without failing. Further, adjust it using the DMA start address to
+         * keep RM's validation schemes happy.
+         */
         *va = *va + dma_dev->addressable_range.start;
     }
 
@@ -915,15 +924,13 @@ void NV_API_CALL nv_dma_unmap_mmio
 )
 {
 #if defined(NV_DMA_MAP_RESOURCE_PRESENT)
-    if (!nv_dma_is_map_resource_implemented(dma_dev))
-    {
-        va = va - dma_dev->addressable_range.start;
-    }
-
     nv_dma_nvlink_addr_decompress(dma_dev, &va, page_count, NV_TRUE);
 
-    dma_unmap_resource(dma_dev->dev, va, page_count * PAGE_SIZE,
-                       DMA_BIDIRECTIONAL, 0);
+    if (nv_dma_use_map_resource(dma_dev))
+    {
+        dma_unmap_resource(dma_dev->dev, va, page_count * PAGE_SIZE,
+                           DMA_BIDIRECTIONAL, 0);
+    }
 #endif
 }
 
@@ -1084,187 +1091,6 @@ void NV_API_CALL nv_dma_release_sgt
 #endif /* NV_LINUX_DMA_BUF_H_PRESENT && NV_DRM_AVAILABLE && NV_DRM_DRM_GEM_H_PRESENT */
 
 #if defined(NV_LINUX_DMA_BUF_H_PRESENT)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #endif /* NV_LINUX_DMA_BUF_H_PRESENT */
 
 #ifndef IMPORT_DMABUF_FUNCTIONS_DEFINED

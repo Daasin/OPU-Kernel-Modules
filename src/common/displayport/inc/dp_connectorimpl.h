@@ -316,11 +316,6 @@ namespace DisplayPort
         bool        bDscMstCapBug3143315;
 
         //
-        // Enable DSC Pass through support in driver based on regkey.
-        //
-        bool        bDscMstEnablePassThrough;
-
-        //
         // Synaptics branch device doesn't support Virtual Peer Devices so DSC
         // capability of downstream device should be decided based on device's own
         // and its parent's DSC capability
@@ -505,6 +500,7 @@ namespace DisplayPort
         void populateDscGpuCaps(DSC_INFO* dscInfo);
         void populateForcedDscParams(DSC_INFO* dscInfo, DSC_INFO::FORCED_DSC_PARAMS* forcedParams);
         void populateDscSinkCaps(DSC_INFO* dscInfo, DeviceImpl * dev);
+        void populateDscBranchCaps(DSC_INFO* dscInfo, DeviceImpl * dev);
         void populateDscModesetInfo(MODESET_INFO * pModesetInfo, const DpModesetParams * pModesetParams);
 
         bool train(const LinkConfiguration & lConfig, bool force, LinkTrainingType trainType = NORMAL_LINK_TRAINING);

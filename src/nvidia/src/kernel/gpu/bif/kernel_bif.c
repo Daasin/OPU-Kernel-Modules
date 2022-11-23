@@ -45,7 +45,7 @@
 /* ------------------------ Static Function Prototypes ---------------------- */
 static void _kbifInitRegistryOverrides(OBJGPU *, KernelBif *);
 static void _kbifCheckIfGpuExists(OBJGPU *, void*);
-
+static NV_STATUS _kbifSetPcieRelaxedOrdering(OBJGPU *, KernelBif *, NvBool);
 
 /* ------------------------ Public Functions -------------------------------- */
 
@@ -92,14 +92,22 @@ kbifStateInitLocked_IMPL
     KernelBif *pKernelBif
 )
 {
-    OBJSYS *pSys = SYS_GET_INSTANCE();
-    OBJOS  *pOS  = SYS_GET_OS(pSys);
-    OBJCL  *pCl  = SYS_GET_CL(pSys);
+    OBJSYS    *pSys   = SYS_GET_INSTANCE();
+    OBJOS     *pOS    = SYS_GET_OS(pSys);
+    OBJCL     *pCl    = SYS_GET_CL(pSys);
+    NV_STATUS  status = NV_OK;
 
     // Return early if GPU is connected to an unsupported chipset
     if (pCl->getProperty(pCl, PDB_PROP_CL_UNSUPPORTED_CHIPSET))
     {
         return NV_ERR_NOT_COMPATIBLE;
+    }
+
+    // Initialize OS mapping and core logic
+    status = osInitMapping(pGpu);
+    if (status != NV_OK)
+    {
+        return status;
     }
 
     // Initialize BIF static info
@@ -119,7 +127,7 @@ kbifStateInitLocked_IMPL
         pKernelBif->setProperty(pKernelBif, PDB_PROP_KBIF_SUPPORT_NONCOHERENT, NV_FALSE);
     }
 
-    return NV_OK;
+    return status;
 }
 
 /*!
@@ -145,8 +153,6 @@ kbifStateLoad_IMPL
     // Check for stale PCI-E dev ctrl/status errors and AER errors
     kbifClearConfigErrors(pGpu, pKernelBif, NV_TRUE, KBIF_CLEAR_XVE_AER_ALL_MASK);
 
-    kbifInitPcieDeviceControlStatus(pGpu, pKernelBif);
-
     //
     // A vGPU cannot disappear and these accesses are
     // particularly expensive on vGPUs
@@ -155,6 +161,70 @@ kbifStateLoad_IMPL
         !IS_VIRTUAL(pGpu))
     {
         osSchedule1SecondCallback(pGpu, _kbifCheckIfGpuExists, NULL, NV_OS_1HZ_REPEAT);
+    }
+
+    return NV_OK;
+}
+
+/*!
+ * @brief Configure PCIe Relaxed Ordering in BIF
+ *
+ * @param[in] pGpu        GPU object pointer
+ * @param[in] pKernelBif  KBIF object pointer
+ * @param[in] enableRo    Enable/disable RO
+ */
+static NV_STATUS
+_kbifSetPcieRelaxedOrdering
+(
+    OBJGPU    *pGpu,
+    KernelBif *pKernelBif,
+    NvBool    enableRo
+)
+{
+    NV2080_CTRL_INTERNAL_BIF_SET_PCIE_RO_PARAMS pcieRo;
+    RM_API    *pRmApi = GPU_GET_PHYSICAL_RMAPI(pGpu);
+    NV_STATUS  status;
+
+    pcieRo.enableRo = enableRo;
+
+    status = pRmApi->Control(pRmApi, pGpu->hInternalClient, pGpu->hInternalSubdevice,
+                             NV2080_CTRL_CMD_INTERNAL_BIF_SET_PCIE_RO,
+                             &pcieRo, sizeof(pcieRo));
+    if (status != NV_OK) {
+        NV_PRINTF(LEVEL_ERROR, "NV2080_CTRL_CMD_INTERNAL_BIF_SET_PCIE_RO failed %s (0x%x)\n",
+                  nvstatusToString(status), status);
+        return status;
+    }
+
+    return NV_OK;
+}
+
+/*!
+ * @brief KernelBif state post-load
+ *
+ * @param[in] pGpu        GPU object pointer
+ * @param[in] pKernelBif  KBIF object pointer
+ * @param[in] flags       GPU state flag
+ */
+NV_STATUS
+kbifStatePostLoad_IMPL
+(
+    OBJGPU      *pGpu,
+    KernelBif   *pKernelBif,
+    NvU32       flags
+)
+{
+    NV_STATUS status;
+
+    kbifInitRelaxedOrderingFromEmulatedConfigSpace(pGpu, pKernelBif);
+    if (pKernelBif->getProperty(pKernelBif, PDB_PROP_KBIF_PCIE_RELAXED_ORDERING_SET_IN_EMULATED_CONFIG_SPACE)) {
+        //
+        // This is done from StatePostLoad() to guarantee that BIF's StateLoad()
+        // is already completed for both monolithic RM and GSP RM.
+        //
+        status = _kbifSetPcieRelaxedOrdering(pGpu, pKernelBif, NV_TRUE);
+        if (status != NV_OK)
+            return NV_OK;
     }
 
     return NV_OK;
@@ -300,6 +370,15 @@ kbifInitPcieDeviceControlStatus
     else
     {
         kbifPcieConfigDisableRelaxedOrdering_HAL(pGpu, pKernelBif);
+    }
+
+    // 
+    // WAR for bug 3661529. All GH100 SKUs will need the NoSnoop WAR.
+    // But currently GSP-RM does not detect this correctly,
+    //
+    if (IsGH100(pGpu))
+    {
+        pCl->setProperty(pCl, PDB_PROP_CL_ROOTPORT_NEEDS_NOSNOOP_WAR, NV_TRUE);
     }
 
     if (!pCl->getProperty(pCl, PDB_PROP_CL_NOSNOOP_NOT_CAPABLE) &&
@@ -700,7 +779,7 @@ kbifGetGpuLinkControlStatus
 static NvBool
 _doesBoardHaveMultipleGpusAndSwitch(OBJGPU *pGpu)
 {
-    if (((gpuIsMultiGpuBoard(pGpu, NULL, NULL)) ||
+    if (((gpuIsMultiGpuBoard(pGpu, NULL)) ||
         (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_GEMINI)))&&
         ((pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_PLX_PRESENT))  ||
          (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_BR03_PRESENT)) ||
@@ -776,7 +855,12 @@ kbifControlGetPCIEInfo_IMPL
                 else
                 {
                     temp = REF_VAL(NV2080_CTRL_BUS_INFO_PCIE_LINK_CTRL_STATUS_LINK_SPEED, temp);
-                    if (temp == NV2080_CTRL_BUS_INFO_PCIE_LINK_CTRL_STATUS_LINK_SPEED_32000MBPS)
+                    if (temp == NV2080_CTRL_BUS_INFO_PCIE_LINK_CTRL_STATUS_LINK_SPEED_64000MBPS)
+                    {
+                        data = FLD_SET_DRF(2080, _CTRL_BUS_INFO_PCIE_LINK_CAP,
+                                           _CURR_LEVEL, _GEN6, data);
+                    }
+                    else if (temp == NV2080_CTRL_BUS_INFO_PCIE_LINK_CTRL_STATUS_LINK_SPEED_32000MBPS)
                     {
                         data = FLD_SET_DRF(2080, _CTRL_BUS_INFO_PCIE_LINK_CAP,
                                            _CURR_LEVEL, _GEN5, data);
@@ -813,7 +897,12 @@ kbifControlGetPCIEInfo_IMPL
                 else
                 {
                     temp = REF_VAL(NV2080_CTRL_BUS_INFO_PCIE_LINK_CAP_MAX_SPEED, temp);
-                    if (temp == NV2080_CTRL_BUS_INFO_PCIE_LINK_CAP_MAX_SPEED_32000MBPS)
+                    if (temp == NV2080_CTRL_BUS_INFO_PCIE_LINK_CAP_MAX_SPEED_64000MBPS)
+                    {
+                        data = FLD_SET_DRF(2080, _CTRL_BUS_INFO_PCIE_LINK_CAP,
+                                           _GEN, _GEN6, data);
+                    }
+                    else if (temp == NV2080_CTRL_BUS_INFO_PCIE_LINK_CAP_MAX_SPEED_32000MBPS)
                     {
                         data = FLD_SET_DRF(2080, _CTRL_BUS_INFO_PCIE_LINK_CAP,
                                            _GEN, _GEN5, data);
@@ -846,7 +935,7 @@ kbifControlGetPCIEInfo_IMPL
                 {
                     NV2080_CTRL_BUS_INFO busInfo = {0};
                     NV_STATUS rmStatus = NV_OK;
-
+ 
                     busInfo.index = NV2080_CTRL_BUS_INFO_INDEX_PCIE_GEN_INFO;
 
                     if ((rmStatus = kbusSendBusInfo(pGpu, GPU_GET_KERNEL_BUS(pGpu), &busInfo)) != NV_OK)
@@ -854,7 +943,7 @@ kbifControlGetPCIEInfo_IMPL
                         NV_PRINTF(LEVEL_INFO, "Squashing rmStatus: %x \n", rmStatus);
                         rmStatus = NV_OK;
                         busInfo.data = 0;
-                    }                    
+                    }
                     data = busInfo.data;
                 }
             }

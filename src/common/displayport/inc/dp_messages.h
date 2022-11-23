@@ -236,6 +236,7 @@ namespace DisplayPort
             MessageManager * parent;
             bool             transmitReply;
             bool             bTransmitted;
+            bool             bBusyWaiting;
             unsigned         requestIdentifier;
             unsigned         messagePriority;
             unsigned         sinkPort;
@@ -261,6 +262,7 @@ namespace DisplayPort
                   parent(0),
                   transmitReply(false),
                   bTransmitted(false),
+                  bBusyWaiting(false),
                   requestIdentifier(requestIdentifier),
                   messagePriority(messagePriority),
                   sinkPort(0xFF)

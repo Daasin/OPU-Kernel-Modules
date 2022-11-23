@@ -36,6 +36,7 @@
 #include "rmapi/client.h"
 #include "rmapi/resource_fwd_decls.h"
 #include "core/thread_state.h"
+#include "virtualization/kernel_hostvgpudeviceapi.h"
 #include "kernel/gpu/mig_mgr/kernel_mig_manager.h"
 #include "kernel/gpu/fifo/kernel_channel.h"
 
@@ -226,6 +227,53 @@ gpuGetByHandle
     return gpuGetByRef(pResourceRef, pbBroadcast, ppGpu);
 }
 
+NV_STATUS gpuRegisterSubdevice_IMPL(OBJGPU *pGpu, Subdevice *pSubdevice)
+{
+    const NvU32 initialSize = 32;
+    const NvU32 expansionFactor = 2;
+
+    if (pGpu->numSubdeviceBackReferences == pGpu->maxSubdeviceBackReferences)
+    {
+        if (pGpu->pSubdeviceBackReferences == NULL)
+        {
+            pGpu->pSubdeviceBackReferences = portMemAllocNonPaged(initialSize * sizeof(Subdevice*));
+            if (pGpu->pSubdeviceBackReferences == NULL)
+                return NV_ERR_NO_MEMORY;
+            pGpu->maxSubdeviceBackReferences = initialSize;
+        }
+        else
+        {
+            const NvU32 newSize = expansionFactor * pGpu->maxSubdeviceBackReferences * sizeof(Subdevice*);
+            Subdevice **newArray = portMemAllocNonPaged(newSize);
+            if (newArray == NULL)
+                return NV_ERR_NO_MEMORY;
+
+            portMemCopy(newArray, newSize, pGpu->pSubdeviceBackReferences, pGpu->maxSubdeviceBackReferences * sizeof(Subdevice*));
+            portMemFree(pGpu->pSubdeviceBackReferences);
+            pGpu->pSubdeviceBackReferences = newArray;
+            pGpu->maxSubdeviceBackReferences *= expansionFactor;
+        }
+    }
+    pGpu->pSubdeviceBackReferences[pGpu->numSubdeviceBackReferences++] = pSubdevice;
+    return NV_OK;
+}
+
+void gpuUnregisterSubdevice_IMPL(OBJGPU *pGpu, Subdevice *pSubdevice)
+{
+    NvU32 i;
+    for (i = 0; i < pGpu->numSubdeviceBackReferences; i++)
+    {
+        if (pGpu->pSubdeviceBackReferences[i] == pSubdevice)
+        {
+            pGpu->numSubdeviceBackReferences--;
+            pGpu->pSubdeviceBackReferences[i] = pGpu->pSubdeviceBackReferences[pGpu->numSubdeviceBackReferences];
+            pGpu->pSubdeviceBackReferences[pGpu->numSubdeviceBackReferences] = NULL;
+            return;
+        }
+    }
+    NV_ASSERT_FAILED("Subdevice not found!");
+}
+
 /*!
  * @brief Determine whether the given event should be triggered on the given
  * subdevice based upon MIG attribution, and translate encoded global IDs into
@@ -263,8 +311,8 @@ _gpuFilterSubDeviceEventInfo
     MIG_INSTANCE_REF ref;
     NvHandle hClient = RES_GET_CLIENT_HANDLE(pSubdevice->pDevice);
     NvU32 engineIdx;
-    NvU32 engineType;
-    NvU32 localType;
+    RM_ENGINE_TYPE rmEngineType;
+    RM_ENGINE_TYPE localRmEngineType;
     NvU32 localIdx;
     NV_STATUS status = NV_OK;
     KernelMIGManager *pKernelMIGManager = GPU_GET_KERNEL_MIG_MANAGER(pGpu);
@@ -314,107 +362,107 @@ _gpuFilterSubDeviceEventInfo
         if (ROBUST_CHANNEL_IS_CE_ERROR(*pInfo32))
         {
             engineIdx = ROBUST_CHANNEL_CE_ERROR_IDX(*pInfo32);
-            engineType = NV2080_ENGINE_TYPE_COPY(engineIdx);
+            rmEngineType = RM_ENGINE_TYPE_COPY(engineIdx);
 
-            if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, engineType, ref))
+            if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, rmEngineType, ref))
                 return NV_ERR_OBJECT_NOT_FOUND;
 
             NV_ASSERT_OK_OR_RETURN(
                 kmigmgrGetGlobalToLocalEngineType(pGpu, pKernelMIGManager, ref,
-                                                  engineType,
-                                                  &localType));
-            localIdx = NV2080_ENGINE_TYPE_COPY_IDX(localType);
+                                                  rmEngineType,
+                                                  &localRmEngineType));
+            localIdx = RM_ENGINE_TYPE_COPY_IDX(localRmEngineType);
             *pInfo32 = ROBUST_CHANNEL_CE_ERROR(localIdx);
         }
         else if (ROBUST_CHANNEL_IS_NVDEC_ERROR(*pInfo32))
         {
             engineIdx = ROBUST_CHANNEL_NVDEC_ERROR_IDX(*pInfo32);
-            engineType = NV2080_ENGINE_TYPE_NVDEC(engineIdx);
+            rmEngineType = RM_ENGINE_TYPE_NVDEC(engineIdx);
 
-            if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, engineType, ref))
+            if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, rmEngineType, ref))
                 return NV_ERR_OBJECT_NOT_FOUND;
 
             NV_ASSERT_OK_OR_RETURN(
                 kmigmgrGetGlobalToLocalEngineType(pGpu, pKernelMIGManager, ref,
-                                                  engineType,
-                                                  &localType));
-            localIdx = NV2080_ENGINE_TYPE_NVDEC_IDX(localType);
+                                                  rmEngineType,
+                                                  &localRmEngineType));
+            localIdx = RM_ENGINE_TYPE_NVDEC_IDX(localRmEngineType);
             *pInfo32 = ROBUST_CHANNEL_NVDEC_ERROR(localIdx);
         }
         else if (ROBUST_CHANNEL_IS_NVENC_ERROR(*pInfo32))
         {
             engineIdx = ROBUST_CHANNEL_NVENC_ERROR_IDX(*pInfo32);
-            engineType = NV2080_ENGINE_TYPE_NVENC(engineIdx);
+            rmEngineType = RM_ENGINE_TYPE_NVENC(engineIdx);
 
-            if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, engineType, ref))
+            if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, rmEngineType, ref))
                 return NV_ERR_OBJECT_NOT_FOUND;
 
             NV_ASSERT_OK_OR_RETURN(
                 kmigmgrGetGlobalToLocalEngineType(pGpu, pKernelMIGManager, ref,
-                                                  engineType,
-                                                  &localType));
-            localIdx = NV2080_ENGINE_TYPE_NVENC_IDX(localType);
+                                                  rmEngineType,
+                                                  &localRmEngineType));
+            localIdx = RM_ENGINE_TYPE_NVENC_IDX(localRmEngineType);
             *pInfo32 = ROBUST_CHANNEL_NVENC_ERROR(localIdx);
         }
     }
     else if (NV2080_NOTIFIER_TYPE_IS_GR(*pNotifyType))
     {
         engineIdx = NV2080_NOTIFIERS_GR_IDX(*pNotifyType);
-        engineType = NV2080_ENGINE_TYPE_GR(engineIdx);
+        rmEngineType = RM_ENGINE_TYPE_GR(engineIdx);
 
-        if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, engineType, ref))
+        if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, rmEngineType, ref))
             return NV_ERR_OBJECT_NOT_FOUND;
 
         NV_ASSERT_OK_OR_RETURN(
             kmigmgrGetGlobalToLocalEngineType(pGpu, pKernelMIGManager, ref,
-                                              engineType,
-                                              &localType));
-        localIdx = NV2080_ENGINE_TYPE_GR_IDX(localType);
+                                              rmEngineType,
+                                              &localRmEngineType));
+        localIdx = RM_ENGINE_TYPE_GR_IDX(localRmEngineType);
         *pNotifyType = NV2080_NOTIFIERS_GR(localIdx);
     }
     else if (NV2080_NOTIFIER_TYPE_IS_CE(*pNotifyType))
     {
         engineIdx = NV2080_NOTIFIERS_CE_IDX(*pNotifyType);
-        engineType = NV2080_ENGINE_TYPE_COPY(engineIdx);
+        rmEngineType = RM_ENGINE_TYPE_COPY(engineIdx);
 
-        if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, engineType, ref))
+        if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, rmEngineType, ref))
             return NV_ERR_OBJECT_NOT_FOUND;
 
         NV_ASSERT_OK_OR_RETURN(
             kmigmgrGetGlobalToLocalEngineType(pGpu, pKernelMIGManager, ref,
-                                              engineType,
-                                              &localType));
-        localIdx = NV2080_ENGINE_TYPE_COPY_IDX(localType);
+                                              rmEngineType,
+                                              &localRmEngineType));
+        localIdx = RM_ENGINE_TYPE_COPY_IDX(localRmEngineType);
         *pNotifyType = NV2080_NOTIFIERS_CE(localIdx);
     }
     else if (NV2080_NOTIFIER_TYPE_IS_NVDEC(*pNotifyType))
     {
         engineIdx = NV2080_NOTIFIERS_NVDEC_IDX(*pNotifyType);
-        engineType = NV2080_ENGINE_TYPE_NVDEC(engineIdx);
+        rmEngineType = RM_ENGINE_TYPE_NVDEC(engineIdx);
 
-        if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, engineType, ref))
+        if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, rmEngineType, ref))
             return NV_ERR_OBJECT_NOT_FOUND;
 
         NV_ASSERT_OK_OR_RETURN(
             kmigmgrGetGlobalToLocalEngineType(pGpu, pKernelMIGManager, ref,
-                                              engineType,
-                                              &localType));
-        localIdx = NV2080_ENGINE_TYPE_NVDEC_IDX(localType);
+                                              rmEngineType,
+                                              &localRmEngineType));
+        localIdx = RM_ENGINE_TYPE_NVDEC_IDX(localRmEngineType);
         *pNotifyType = NV2080_NOTIFIERS_NVDEC(localIdx);
     }
     else if (NV2080_NOTIFIER_TYPE_IS_NVENC(*pNotifyType))
     {
         engineIdx = NV2080_NOTIFIERS_NVENC_IDX(*pNotifyType);
-        engineType = NV2080_ENGINE_TYPE_NVENC(engineIdx);
+        rmEngineType = RM_ENGINE_TYPE_NVENC(engineIdx);
 
-        if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, engineType, ref))
+        if (!kmigmgrIsEngineInInstance(pGpu, pKernelMIGManager, rmEngineType, ref))
             return NV_ERR_OBJECT_NOT_FOUND;
 
         NV_ASSERT_OK_OR_RETURN(
             kmigmgrGetGlobalToLocalEngineType(pGpu, pKernelMIGManager, ref,
-                                              engineType,
-                                              &localType));
-        localIdx = NV2080_ENGINE_TYPE_NVENC_IDX(localType);
+                                              rmEngineType,
+                                              &localRmEngineType));
+        localIdx = RM_ENGINE_TYPE_NVENC_IDX(localRmEngineType);
         *pNotifyType = NV2080_NOTIFIERS_NVENC(localIdx);
     }
     return NV_OK;
@@ -437,9 +485,9 @@ gpuNotifySubDeviceEvent_IMPL
 {
     PEVENTNOTIFICATION pEventNotification;
     THREAD_STATE_NODE *pCurThread;
-    RS_SHARE_ITERATOR it = serverutilShareIter(classId(NotifShare));
     NvU32 localNotifyType;
     NvU32 localInfo32;
+    NvU32 i;
 
     if (NV_OK == threadStateGetCurrent(&pCurThread, pGpu))
     {
@@ -451,22 +499,11 @@ gpuNotifySubDeviceEvent_IMPL
     NV_ASSERT(notifyIndex < NV2080_NOTIFIERS_MAXCOUNT);
 
     // search notifiers with events hooked up for this gpu
-    while (serverutilShareIterNext(&it))
+    for (i = 0; i < pGpu->numSubdeviceBackReferences; i++)
     {
-        RsShared *pShared = it.pShared;
-        Subdevice *pSubdevice;
-        INotifier *pNotifier;
-        NotifShare *pNotifierShare = dynamicCast(pShared, NotifShare);
+        Subdevice *pSubdevice = pGpu->pSubdeviceBackReferences[i];
+        INotifier *pNotifier = staticCast(pSubdevice, INotifier);
 
-        if ((pNotifierShare == NULL) || (pNotifierShare->pNotifier == NULL))
-            continue;
-
-        pNotifier = pNotifierShare->pNotifier;
-        pSubdevice = dynamicCast(pNotifier, Subdevice);
-
-        // Only notify matching GPUs
-        if ((pSubdevice == NULL) || (GPU_RES_GET_GPU(pSubdevice) != pGpu))
-            continue;
         GPU_RES_SET_THREAD_BC_STATE(pSubdevice);
 
         //
@@ -518,6 +555,59 @@ gpuNotifySubDeviceEvent_IMPL
             }
 
             pSubdevice->notifyActions[localNotifyType] = NV2080_CTRL_EVENT_SET_NOTIFICATION_ACTION_DISABLE;
+        }
+    }
+}
+
+//
+// For a particular gpu, find all the clients waiting for a particular event,
+// fill in the notifier if allocated, and raise an event to the client if registered.
+//
+void
+gpuGspPluginTriggeredEvent_IMPL
+(
+    OBJGPU *pGpu,
+    NvU32   gfid,
+    NvU32   notifyIndex
+)
+{
+    PEVENTNOTIFICATION pEventNotification;
+    RS_SHARE_ITERATOR it = serverutilShareIter(classId(NotifShare));
+
+    NV_ASSERT_OR_RETURN_VOID(notifyIndex < NVA084_NOTIFIERS_MAXCOUNT);
+
+    // search notifiers with events hooked up for this gpu
+    while (serverutilShareIterNext(&it))
+    {
+        RsShared *pShared = it.pShared;
+        KernelHostVgpuDeviceApi *pKernelHostVgpuDeviceApi;
+        INotifier *pNotifier;
+        NotifShare *pNotifierShare = dynamicCast(pShared, NotifShare);
+        KERNEL_HOST_VGPU_DEVICE *pKernelHostVgpuDevice;
+
+        if ((pNotifierShare == NULL) || (pNotifierShare->pNotifier == NULL))
+            continue;
+
+        pNotifier = pNotifierShare->pNotifier;
+        pKernelHostVgpuDeviceApi = dynamicCast(pNotifier, KernelHostVgpuDeviceApi);
+
+        // Only notify matching GPUs
+        if ((pKernelHostVgpuDeviceApi == NULL) || (GPU_RES_GET_GPU(pKernelHostVgpuDeviceApi) != pGpu))
+            continue;
+        GPU_RES_SET_THREAD_BC_STATE(pKernelHostVgpuDeviceApi);
+
+        pKernelHostVgpuDevice = pKernelHostVgpuDeviceApi->pShared->pDevice;
+
+        // Only notify matching GFID
+        if (pKernelHostVgpuDevice == NULL || (gfid != pKernelHostVgpuDevice->gfid))
+            continue;
+
+        pEventNotification = inotifyGetNotificationList(pNotifier);
+        if (pEventNotification != NULL)
+        {
+            // ping any events on the list of type notifyIndex
+            osEventNotification(pGpu, pEventNotification, notifyIndex,
+                                        NULL, 0);
         }
     }
 }
@@ -650,6 +740,15 @@ gpuGetProcWithObject_IMPL
                     break;
                 }
 
+                case (classId(KernelHostVgpuDeviceApi)):
+                {
+                    KernelHostVgpuDeviceApi *pKernelHostVgpuDeviceApi = dynamicCast(pResourceRef->pResource, KernelHostVgpuDeviceApi);
+                    if (pKernelHostVgpuDeviceApi->pShared->pDevice->vgpuGuest)
+                    {
+                        elementInClient = NV_TRUE;
+                    }
+                    break;
+                }
                 case (classId(Device)):
                 case (classId(Subdevice)):
                 {

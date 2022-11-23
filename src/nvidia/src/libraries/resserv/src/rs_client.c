@@ -467,6 +467,27 @@ clientValidate_IMPL
     return NV_OK;
 }
 
+RS_PRIV_LEVEL
+clientGetCachedPrivilege_IMPL
+(
+    RsClient *pClient
+)
+{
+    // Non-functional, base class stubs
+    return RS_PRIV_LEVEL_USER;
+}
+
+NvBool
+clientIsAdmin_IMPL
+(
+    RsClient *pClient,
+    RS_PRIV_LEVEL privLevel
+)
+{
+    // Non-functional, base class stubs
+    return NV_FALSE;
+}
+
 NV_STATUS
 clientAllocResource_IMPL
 (
@@ -1084,7 +1105,8 @@ _clientUnmapResourceRefMappings
             : pCpuMapping->pContextRef->hResource;
         params.hMemory = pResourceRef->hResource;
         params.pLinearAddress = pCpuMapping->pLinearAddress;
-        params.processId = pCpuMapping->processId; 
+        params.processId = pCpuMapping->processId;
+        params.bTeardown = NV_TRUE;
         params.flags = pCpuMapping->flags;
         params.pSecInfo = &pCallContext->secInfo;
         params.pLockInfo = &lockInfo;
@@ -1147,6 +1169,7 @@ _clientUnmapBackRefMappings
         params.hMemory = pBackRef->hResource;
         params.pLinearAddress = pCpuMapping->pLinearAddress;
         params.processId = pCpuMapping->processId;
+        params.bTeardown = NV_TRUE;
         params.flags = pCpuMapping->flags;
         params.pSecInfo = &pCallContext->secInfo;
         params.pLockInfo = &lockInfo;
